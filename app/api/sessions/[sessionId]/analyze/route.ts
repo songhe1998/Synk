@@ -2,7 +2,8 @@ import {
   getSessionAsset,
   getSessionDetail,
   saveSessionAnalysis,
-  saveSessionAsset
+  saveSessionAsset,
+  updateSessionPreferences
 } from "@/lib/session-store";
 import {
   extractSceneFromTranscript,
@@ -11,13 +12,26 @@ import {
   renderSketchPng
 } from "@/lib/scene-analysis";
 import { buildDisplayTranscript } from "@/lib/transcript-format";
+import { AnalysisReasoningEffort } from "@/lib/types";
 import { NextResponse } from "next/server";
 
+function parseReasoningEffort(value: unknown): AnalysisReasoningEffort | undefined {
+  return value === "low" || value === "medium" || value === "high" ? value : undefined;
+}
+
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
+  const body = await request.json().catch(() => ({}));
+  const requestedEffort = parseReasoningEffort(body?.reasoningEffort);
+  if (requestedEffort) {
+    await updateSessionPreferences(sessionId, {
+      analysisReasoningEffort: requestedEffort
+    });
+  }
+
   const session = await getSessionDetail(sessionId);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -34,7 +48,11 @@ export async function POST(
 
   try {
     const transcriptText = buildDisplayTranscript(session.transcript);
-    const extraction = await extractSceneFromTranscript(transcriptText, apiKey);
+    const extraction = await extractSceneFromTranscript(
+      transcriptText,
+      apiKey,
+      session.analysisReasoningEffort
+    );
 
     const groundedAnalysis = groundSceneExtraction({
       transcript: session.transcript,

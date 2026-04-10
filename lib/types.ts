@@ -2,6 +2,8 @@ export type SessionStatus = "created" | "uploaded" | "processing" | "ready" | "f
 
 export type DrawingTool = "pen" | "eraser";
 export type TokenGranularity = "word" | "char" | "punctuation";
+export type AnalysisReasoningEffort = "low" | "medium" | "high";
+export type ImageSizePreset = "small" | "medium" | "large";
 export type AssetKind =
   | "sketch"
   | "annotatedSketch"
@@ -158,6 +160,8 @@ export interface SessionSummary {
   canvasWidth: number;
   canvasHeight: number;
   transcriptApproximate: boolean;
+  analysisReasoningEffort: AnalysisReasoningEffort;
+  imageSizePreset: ImageSizePreset;
   errorMessage: string | null;
 }
 

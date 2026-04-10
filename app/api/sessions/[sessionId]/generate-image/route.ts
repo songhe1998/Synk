@@ -1,7 +1,16 @@
-import { getSessionAsset, getSessionDetail, saveSessionAsset } from "@/lib/session-store";
+import {
+  getSessionAsset,
+  getSessionDetail,
+  saveSessionAsset,
+  updateSessionPreferences
+} from "@/lib/session-store";
 import { generateImageFromSketch } from "@/lib/scene-analysis";
-import { ImageGenerationSource } from "@/lib/types";
+import { ImageGenerationSource, ImageSizePreset } from "@/lib/types";
 import { NextResponse } from "next/server";
+
+function parseImageSizePreset(value: unknown): ImageSizePreset | undefined {
+  return value === "small" || value === "medium" || value === "large" ? value : undefined;
+}
 
 export async function POST(
   request: Request,
@@ -13,6 +22,12 @@ export async function POST(
     body?.source === "plain" || body?.source === "labeled"
       ? (body.source as ImageGenerationSource)
       : "labeled";
+  const requestedImageSize = parseImageSizePreset(body?.imageSizePreset);
+  if (requestedImageSize) {
+    await updateSessionPreferences(sessionId, {
+      imageSizePreset: requestedImageSize
+    });
+  }
   const session = await getSessionDetail(sessionId);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -48,7 +63,8 @@ export async function POST(
       apiKey,
       width: session.canvasWidth,
       height: session.canvasHeight,
-      source
+      source,
+      imageSizePreset: session.imageSizePreset
     });
 
     await saveSessionAsset(

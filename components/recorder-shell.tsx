@@ -4,9 +4,18 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { DEMO_CANVAS, applyDrawingEvent, createEmptyDrawingState, drawDrawingState, formatDuration } from "@/lib/drawing";
-import { DrawingEvent, DrawingState, DrawingTool, SessionSummary } from "@/lib/types";
+import {
+  AnalysisReasoningEffort,
+  DrawingEvent,
+  DrawingState,
+  DrawingTool,
+  ImageSizePreset,
+  SessionSummary
+} from "@/lib/types";
 
 const PEN_COLORS = ["#20222b", "#f05a28", "#1f7a8c", "#208d64", "#c13c6f"];
+const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
+const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 
 function statusLabel(status: SessionSummary["status"]) {
   switch (status) {
@@ -52,6 +61,8 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   const [tool, setTool] = useState<DrawingTool>("pen");
   const [color, setColor] = useState(PEN_COLORS[0]);
   const [brushWidth, setBrushWidth] = useState(6);
+  const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
+  const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [liveStrokeCount, setLiveStrokeCount] = useState(0);
   const [canRedo, setCanRedo] = useState(false);
@@ -144,7 +155,9 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          title: makeTitle()
+          title: makeTitle(),
+          analysisReasoningEffort,
+          imageSizePreset
         })
       });
 
@@ -469,6 +482,42 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
             <button type="button" className="ghost-button" onClick={handleClear} disabled={phase !== "recording"}>
               Clear
             </button>
+          </div>
+
+          <div className="analysis-options-grid">
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Reasoning effort</span>
+              <div className="segmented-control">
+                {REASONING_EFFORTS.map((effort) => (
+                  <button
+                    key={effort}
+                    type="button"
+                    className={analysisReasoningEffort === effort ? "active" : ""}
+                    onClick={() => setAnalysisReasoningEffort(effort)}
+                    disabled={phase === "recording" || isBusy}
+                  >
+                    {effort}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Image size</span>
+              <div className="segmented-control">
+                {IMAGE_SIZE_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={imageSizePreset === preset ? "active" : ""}
+                    onClick={() => setImageSizePreset(preset)}
+                    disabled={phase === "recording" || isBusy}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="canvas-frame">

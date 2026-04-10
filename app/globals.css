@@ -190,6 +190,25 @@ textarea {
   justify-content: flex-end;
 }
 
+.analysis-options-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.analysis-option-group {
+  display: grid;
+  gap: 8px;
+}
+
+.analysis-option-label {
+  font-size: 0.82rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 .status-chip,
 .status-badge {
   display: inline-flex;
@@ -474,6 +493,14 @@ textarea {
   border: 1px solid rgba(31, 31, 38, 0.08);
 }
 
+.analysis-collapsed-card {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(31, 31, 38, 0.08);
+}
+
 .analysis-card-header {
   display: flex;
   justify-content: space-between;
@@ -546,7 +573,8 @@ textarea {
   .workspace-grid,
   .playback-grid,
   .analysis-grid,
-  .analysis-layout {
+  .analysis-layout,
+  .analysis-options-grid {
     grid-template-columns: 1fr;
   }
 

@@ -2,8 +2,10 @@ import { randomUUID } from "crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "fs/promises";
 import path from "path";
 import {
+  AnalysisReasoningEffort,
   AssetKind,
   DrawingEvent,
+  ImageSizePreset,
   SceneAnalysis,
   SessionDetail,
   SessionSummary,
@@ -13,6 +15,8 @@ import {
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 const INDEX_PATH = path.join(DATA_ROOT, "index.json");
 const MAX_SESSIONS = 8;
+const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
+const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
 
 interface SessionMeta extends SessionSummary {}
 
@@ -25,6 +29,24 @@ interface UploadPayload {
   canvasHeight: number;
   durationMs: number;
   sketchBuffer?: Buffer | null;
+}
+
+function normalizeSummary(summary: SessionSummary | (Partial<SessionSummary> & { id: string; title: string; status: SessionSummary["status"]; createdAt: string; updatedAt: string; durationMs: number; audioMimeType: string | null; canvasWidth: number; canvasHeight: number; transcriptApproximate: boolean; errorMessage: string | null; })) {
+  return {
+    ...summary,
+    analysisReasoningEffort:
+      summary.analysisReasoningEffort === "low" ||
+      summary.analysisReasoningEffort === "medium" ||
+      summary.analysisReasoningEffort === "high"
+        ? summary.analysisReasoningEffort
+        : DEFAULT_ANALYSIS_REASONING_EFFORT,
+    imageSizePreset:
+      summary.imageSizePreset === "small" ||
+      summary.imageSizePreset === "medium" ||
+      summary.imageSizePreset === "large"
+        ? summary.imageSizePreset
+        : DEFAULT_IMAGE_SIZE_PRESET
+  } satisfies SessionSummary;
 }
 
 function getSessionDir(sessionId: string) {
@@ -82,7 +104,9 @@ async function readIndex() {
   await ensureStorage();
   const content = await readFile(INDEX_PATH, "utf8");
   const parsed = JSON.parse(content) as SessionSummary[];
-  return parsed.sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+  return parsed
+    .map((summary) => normalizeSummary(summary))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
 }
 
 async function writeIndex(summaries: SessionSummary[]) {
@@ -95,13 +119,13 @@ async function writeIndex(summaries: SessionSummary[]) {
 
 async function writeMeta(summary: SessionSummary) {
   await mkdir(getSessionDir(summary.id), { recursive: true });
-  await writeJsonAtomic(getMetaPath(summary.id), summary);
+  await writeJsonAtomic(getMetaPath(summary.id), normalizeSummary(summary));
 }
 
 async function upsertSummary(summary: SessionSummary) {
   const current = await readIndex();
   const filtered = current.filter((item) => item.id !== summary.id);
-  filtered.unshift(summary);
+  filtered.unshift(normalizeSummary(summary));
   await writeIndex(filtered);
   await writeMeta(summary);
 }
@@ -126,7 +150,7 @@ async function pruneSessions() {
 async function readMeta(sessionId: string): Promise<SessionMeta | null> {
   try {
     const content = await readFile(getMetaPath(sessionId), "utf8");
-    return JSON.parse(content) as SessionMeta;
+    return normalizeSummary(JSON.parse(content) as SessionMeta);
   } catch {
     return null;
   }
@@ -154,7 +178,13 @@ function inferAudioExtension(mimeType: string) {
   return "bin";
 }
 
-export async function createSession(title?: string) {
+export async function createSession(
+  title?: string,
+  options?: {
+    analysisReasoningEffort?: AnalysisReasoningEffort;
+    imageSizePreset?: ImageSizePreset;
+  }
+) {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   const summary: SessionSummary = {
@@ -168,6 +198,8 @@ export async function createSession(title?: string) {
     canvasWidth: 0,
     canvasHeight: 0,
     transcriptApproximate: false,
+    analysisReasoningEffort: options?.analysisReasoningEffort ?? DEFAULT_ANALYSIS_REASONING_EFFORT,
+    imageSizePreset: options?.imageSizePreset ?? DEFAULT_IMAGE_SIZE_PRESET,
     errorMessage: null
   };
 
@@ -178,6 +210,30 @@ export async function createSession(title?: string) {
 
 export async function listRecentSessions() {
   return readIndex();
+}
+
+export async function updateSessionPreferences(
+  sessionId: string,
+  preferences: {
+    analysisReasoningEffort?: AnalysisReasoningEffort;
+    imageSizePreset?: ImageSizePreset;
+  }
+) {
+  const summary = await readMeta(sessionId);
+  if (!summary) {
+    throw new Error("Session not found");
+  }
+
+  const nextSummary = normalizeSummary({
+    ...summary,
+    updatedAt: new Date().toISOString(),
+    analysisReasoningEffort:
+      preferences.analysisReasoningEffort ?? summary.analysisReasoningEffort,
+    imageSizePreset: preferences.imageSizePreset ?? summary.imageSizePreset
+  });
+
+  await upsertSummary(nextSummary);
+  return nextSummary;
 }
 
 export async function saveSessionUpload(sessionId: string, payload: UploadPayload) {

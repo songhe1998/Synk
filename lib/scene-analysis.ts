@@ -2,10 +2,12 @@ import sharp from "sharp";
 import { buildDrawingState } from "@/lib/drawing";
 import { buildDisplayTranscript, matchEvidenceQuote } from "@/lib/transcript-format";
 import {
+  AnalysisReasoningEffort,
   BoundingBox,
   DrawingEvent,
   GlobalSceneInfo,
   GroundedSceneObject,
+  ImageSizePreset,
   ImageGenerationSource,
   Point2D,
   SceneAnalysis,
@@ -226,6 +228,18 @@ function inferLandscapeSize(width: number, height: number) {
   return "1024x1024";
 }
 
+function resolveImageToolSize(width: number, height: number, preset: ImageSizePreset) {
+  if (preset === "small") {
+    return "1024x1024";
+  }
+
+  if (preset === "large") {
+    return "auto";
+  }
+
+  return inferLandscapeSize(width, height);
+}
+
 async function callResponsesApi(payload: object, apiKey: string) {
   const response = await fetch(RESPONSES_URL, {
     method: "POST",
@@ -270,12 +284,16 @@ Rules:
 - Write generation_prompt as a natural paragraph that will help an image model follow the sketch layout and labels closely.
 `.trim();
 
-export async function extractSceneFromTranscript(transcriptText: string, apiKey: string) {
+export async function extractSceneFromTranscript(
+  transcriptText: string,
+  apiKey: string,
+  reasoningEffort: AnalysisReasoningEffort
+) {
   const payload = await callResponsesApi(
     {
       model: SCENE_MODEL,
       reasoning: {
-        effort: "high"
+        effort: reasoningEffort
       },
       store: false,
       instructions: SCENE_ANALYSIS_PROMPT,
@@ -676,7 +694,8 @@ export async function generateImageFromSketch({
   apiKey,
   width,
   height,
-  source
+  source,
+  imageSizePreset
 }: {
   prompt: string;
   sketchImage: Buffer;
@@ -684,6 +703,7 @@ export async function generateImageFromSketch({
   width: number;
   height: number;
   source: ImageGenerationSource;
+  imageSizePreset: ImageSizePreset;
 }) {
   const imageDataUrl = `data:image/png;base64,${sketchImage.toString("base64")}`;
   const sourceInstruction =
@@ -712,7 +732,7 @@ export async function generateImageFromSketch({
         {
           type: "image_generation",
           action: "edit",
-          size: inferLandscapeSize(width, height),
+          size: resolveImageToolSize(width, height, imageSizePreset),
           quality: "medium",
           input_fidelity: "high"
         }

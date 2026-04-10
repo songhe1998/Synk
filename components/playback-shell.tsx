@@ -4,14 +4,18 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { applyDrawingEvent, createEmptyDrawingState, drawDrawingState, formatDuration } from "@/lib/drawing";
 import {
+  AnalysisReasoningEffort,
   DrawingState,
   GroundedSceneObject,
   ImageGenerationSource,
+  ImageSizePreset,
   SessionDetail,
   TranscriptToken
 } from "@/lib/types";
 
 type AssetView = "sketch" | "annotatedSketch" | "generatedLabeled" | "generatedPlain";
+const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
+const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 
 function getActiveTokenIndex(tokens: TranscriptToken[], currentTimeMs: number) {
   return tokens.findIndex((token, index) => {
@@ -64,6 +68,9 @@ function resolveAssetView(session: SessionDetail, preferred: AssetView | null) {
 export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [sessionData, setSessionData] = useState(session);
   const [selectedAssetView, setSelectedAssetView] = useState<AssetView>(() => getDefaultAssetView(session));
+  const [reasoningEffort, setReasoningEffort] = useState<AnalysisReasoningEffort>(session.analysisReasoningEffort);
+  const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>(session.imageSizePreset);
+  const [analysisExpanded, setAnalysisExpanded] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const replayStateRef = useRef<DrawingState>(createEmptyDrawingState());
@@ -79,6 +86,8 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [generationSourceBusy, setGenerationSourceBusy] = useState<ImageGenerationSource | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
+  const autoAnalyzeAttemptRef = useRef<string | null>(null);
+  const autoGenerateLabeledAttemptRef = useRef<string | null>(null);
 
   function cancelPlaybackLoop() {
     if (animationFrameRef.current) {
@@ -214,17 +223,27 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
     }
     const payload = (await response.json()) as SessionDetail;
     setSessionData(payload);
+    setReasoningEffort(payload.analysisReasoningEffort);
+    setImageSizePreset(payload.imageSizePreset);
     setSelectedAssetView((current) => resolveAssetView(payload, current));
     return payload;
   }
 
-  async function runAnalysis() {
-    setPipelineError(null);
+  async function runAnalysis(options?: { background?: boolean }) {
+    if (!options?.background) {
+      setPipelineError(null);
+    }
     setAnalysisBusy(true);
 
     try {
       const response = await fetch(`/api/sessions/${sessionData.id}/analyze`, {
-        method: "POST"
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          reasoningEffort
+        })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -232,16 +251,22 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
       }
       const nextSession = payload as SessionDetail;
       setSessionData(nextSession);
+      setReasoningEffort(nextSession.analysisReasoningEffort);
+      setImageSizePreset(nextSession.imageSizePreset);
       setSelectedAssetView(resolveAssetView(nextSession, "annotatedSketch"));
     } catch (error) {
-      setPipelineError(error instanceof Error ? error.message : "Analysis failed.");
+      if (!options?.background) {
+        setPipelineError(error instanceof Error ? error.message : "Analysis failed.");
+      }
     } finally {
       setAnalysisBusy(false);
     }
   }
 
-  async function runImageGeneration(source: ImageGenerationSource) {
-    setPipelineError(null);
+  async function runImageGeneration(source: ImageGenerationSource, options?: { background?: boolean }) {
+    if (!options?.background) {
+      setPipelineError(null);
+    }
     setGenerationSourceBusy(source);
 
     try {
@@ -250,7 +275,10 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ source })
+        body: JSON.stringify({
+          source,
+          imageSizePreset
+        })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -258,9 +286,13 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
       }
       const nextSession = payload as SessionDetail;
       setSessionData(nextSession);
+      setReasoningEffort(nextSession.analysisReasoningEffort);
+      setImageSizePreset(nextSession.imageSizePreset);
       setSelectedAssetView(resolveAssetView(nextSession, source === "labeled" ? "generatedLabeled" : "generatedPlain"));
     } catch (error) {
-      setPipelineError(error instanceof Error ? error.message : "Image generation failed.");
+      if (!options?.background) {
+        setPipelineError(error instanceof Error ? error.message : "Image generation failed.");
+      }
     } finally {
       setGenerationSourceBusy(null);
     }
@@ -295,6 +327,58 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
         };
     }
   })();
+
+  useEffect(() => {
+    const nextAutoAnalyzeKey = `${sessionData.id}:${reasoningEffort}`;
+    const shouldAutoAnalyze =
+      sessionData.transcript.length > 0 &&
+      !sessionData.analysis &&
+      !analysisBusy &&
+      generationSourceBusy === null &&
+      autoAnalyzeAttemptRef.current !== nextAutoAnalyzeKey;
+
+    if (!shouldAutoAnalyze) {
+      return;
+    }
+
+    autoAnalyzeAttemptRef.current = nextAutoAnalyzeKey;
+    void runAnalysis({ background: true });
+  }, [
+    analysisBusy,
+    generationSourceBusy,
+    reasoningEffort,
+    sessionData.analysis,
+    sessionData.id,
+    sessionData.transcript.length
+  ]);
+
+  useEffect(() => {
+    const analysisCreatedAt = sessionData.analysis?.createdAt;
+    if (!analysisCreatedAt) {
+      return;
+    }
+
+    const nextAutoGenerateKey = `${sessionData.id}:${analysisCreatedAt}:${imageSizePreset}:labeled`;
+    const shouldAutoGenerateLabeled =
+      !analysisBusy &&
+      generationSourceBusy === null &&
+      !sessionData.generatedImageLabeledUrl &&
+      autoGenerateLabeledAttemptRef.current !== nextAutoGenerateKey;
+
+    if (!shouldAutoGenerateLabeled) {
+      return;
+    }
+
+    autoGenerateLabeledAttemptRef.current = nextAutoGenerateKey;
+    void runImageGeneration("labeled", { background: true });
+  }, [
+    analysisBusy,
+    generationSourceBusy,
+    imageSizePreset,
+    sessionData.analysis?.createdAt,
+    sessionData.generatedImageLabeledUrl,
+    sessionData.id
+  ]);
 
   function renderObjectCard(object: GroundedSceneObject) {
     return (
@@ -470,19 +554,18 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               </button>
               <button
                 type="button"
-                className="primary-button"
-                onClick={runAnalysis}
-                disabled={analysisBusy || generationSourceBusy !== null}
+                className="ghost-button"
+                onClick={() => setAnalysisExpanded((value) => !value)}
               >
-                {analysisBusy ? "Analyzing..." : "Analyze with GPT-5.4"}
+                {analysisExpanded ? "Hide analysis" : "Show analysis"}
               </button>
               <button
                 type="button"
                 className="primary-button"
-                onClick={() => runImageGeneration("labeled")}
-                disabled={!sessionData.analysis || analysisBusy || generationSourceBusy !== null}
+                onClick={() => runAnalysis()}
+                disabled={analysisBusy || generationSourceBusy !== null}
               >
-                {generationSourceBusy === "labeled" ? "Generating labeled..." : "Generate from labeled sketch"}
+                {analysisBusy ? "Analyzing..." : "Analyze with GPT-5.4"}
               </button>
               <button
                 type="button"
@@ -497,7 +580,57 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
 
           {pipelineError ? <p className="error-banner">{pipelineError}</p> : null}
 
-          {sessionData.analysis ? (
+          <div className="analysis-options-grid">
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Reasoning effort</span>
+              <div className="segmented-control">
+                {REASONING_EFFORTS.map((effort) => (
+                  <button
+                    key={effort}
+                    type="button"
+                    className={reasoningEffort === effort ? "active" : ""}
+                    onClick={() => setReasoningEffort(effort)}
+                    disabled={analysisBusy || generationSourceBusy !== null}
+                  >
+                    {effort}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Image size</span>
+              <div className="segmented-control">
+                {IMAGE_SIZE_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={imageSizePreset === preset ? "active" : ""}
+                    onClick={() => setImageSizePreset(preset)}
+                    disabled={analysisBusy || generationSourceBusy !== null}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {!analysisExpanded ? (
+            <div className="analysis-collapsed-card">
+              <p className="analysis-copy">
+                {analysisBusy
+                  ? `Analysis is running in the background with ${reasoningEffort} reasoning.`
+                  : generationSourceBusy === "labeled"
+                    ? `Analysis is ready and the labeled result is generating automatically at ${imageSizePreset} size.`
+                  : sessionData.analysis
+                    ? sessionData.generatedImageLabeledUrl
+                      ? "Analysis is ready and the labeled result has already been generated. Expand this panel to inspect objects, evidence, and the generation prompt."
+                      : "Analysis is ready. The labeled result will generate automatically; expand this panel to inspect objects, evidence, and the generation prompt."
+                    : "Analysis will run automatically after transcription, then the labeled result will generate automatically."}
+              </p>
+            </div>
+          ) : sessionData.analysis ? (
             <div className="analysis-layout">
               <div className="analysis-column">
                 <div className="analysis-summary-card">
