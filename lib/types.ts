@@ -12,6 +12,9 @@ export type AssetKind =
   | "generatedImagePlain";
 export type EvidenceMatchKind = "exact" | "punctuation_insensitive" | "missing";
 export type ImageGenerationSource = "labeled" | "plain";
+export type WorldJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type WorldModelPreset = "draft" | "hd";
+export type WorldSourceAssetKind = "generatedImageLabeled" | "generatedImagePlain";
 
 export type DrawingEvent =
   | {
@@ -163,6 +166,7 @@ export interface SessionSummary {
   analysisReasoningEffort: AnalysisReasoningEffort;
   imageSizePreset: ImageSizePreset;
   errorMessage: string | null;
+  preferredResultUrl?: string | null;
 }
 
 export interface SessionDetail extends SessionSummary {
@@ -175,9 +179,49 @@ export interface SessionDetail extends SessionSummary {
   generatedImageLabeledUrl: string | null;
   generatedImagePlainUrl: string | null;
   analysis: SceneAnalysis | null;
+  worldJobs: WorldJob[];
 }
 
 export interface TranscriptNormalizationResult {
   tokens: TranscriptToken[];
   approximate: boolean;
+}
+
+export interface WorldAssetSnapshot {
+  worldId: string;
+  displayName: string;
+  model: string | null;
+  worldMarbleUrl: string | null;
+  caption: string | null;
+  thumbnailUrl: string | null;
+  panoUrl: string | null;
+  colliderMeshUrl: string | null;
+  spz100kUrl: string | null;
+  spz500kUrl: string | null;
+  spzFullResUrl: string | null;
+  groundPlaneOffset: number | null;
+  metricScaleFactor: number | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface WorldJob {
+  id: string;
+  sessionId: string;
+  status: WorldJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  displayName: string;
+  modelPreset: WorldModelPreset;
+  requestedModel: string;
+  sourceAssetKind: WorldSourceAssetKind;
+  sourceImageUrl: string | null;
+  prompt: string;
+  operationId: string | null;
+  operationExpiresAt: string | null;
+  worldId: string | null;
+  errorMessage: string | null;
+  statusDetail: string | null;
+  world: WorldAssetSnapshot | null;
 }

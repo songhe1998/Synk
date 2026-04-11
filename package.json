@@ -11,14 +11,17 @@
     "start": "next start"
   },
   "dependencies": {
+    "@sparkjsdev/spark": "^0.1.10",
     "next": "^15.0.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "three": "^0.183.2"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/three": "^0.183.1",
     "typescript": "^5.0.0"
   }
 }

@@ -11,6 +11,7 @@ import {
   SessionSummary,
   TranscriptToken
 } from "@/lib/types";
+import { listWorldJobs } from "@/lib/world-store";
 
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 const INDEX_PATH = path.join(DATA_ROOT, "index.json");
@@ -178,6 +179,29 @@ function inferAudioExtension(mimeType: string) {
   return "bin";
 }
 
+async function getPreferredResultUrl(sessionId: string) {
+  const worldJobs = await listWorldJobs(sessionId);
+  if (worldJobs.length > 0) {
+    return `/sessions/${sessionId}/worlds/${worldJobs[0].id}`;
+  }
+
+  try {
+    const files = await readdir(getSessionDir(sessionId));
+    const hasGeneratedImage =
+      files.includes("generated-image-labeled.png") ||
+      files.includes("generated-image-plain.png") ||
+      files.includes("generated-image.png");
+
+    if (hasGeneratedImage) {
+      return `/sessions/${sessionId}/image`;
+    }
+  } catch {
+    return `/sessions/${sessionId}`;
+  }
+
+  return `/sessions/${sessionId}`;
+}
+
 export async function createSession(
   title?: string,
   options?: {
@@ -209,7 +233,13 @@ export async function createSession(
 }
 
 export async function listRecentSessions() {
-  return readIndex();
+  const summaries = await readIndex();
+  return Promise.all(
+    summaries.map(async (summary) => ({
+      ...summary,
+      preferredResultUrl: await getPreferredResultUrl(summary.id)
+    }))
+  );
 }
 
 export async function updateSessionPreferences(
@@ -365,6 +395,7 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
   const events = await readJsonFile<DrawingEvent[]>(getEventsPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
+  const worldJobs = await listWorldJobs(sessionId);
 
   const sessionDir = getSessionDir(sessionId);
   const files = await readdir(sessionDir);
@@ -396,7 +427,8 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
     generatedImagePlainUrl: generatedImagePlainExists
       ? `/api/sessions/${sessionId}/assets/generatedImagePlain`
       : null,
-    analysis
+    analysis,
+    worldJobs
   };
 }
 

@@ -1,5 +1,6 @@
 "use client";
 
+import type { Route } from "next";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -13,9 +14,58 @@ import {
   SessionSummary
 } from "@/lib/types";
 
-const PEN_COLORS = ["#20222b", "#f05a28", "#1f7a8c", "#208d64", "#c13c6f"];
+const DEFAULT_PEN_COLOR = "#20222b";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
+type OutputTarget = "image" | "world";
+type RecorderPhase = "idle" | "recording" | "uploading" | "processing" | "creating" | "error";
+
+function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMessage: string | null) {
+  switch (phase) {
+    case "idle":
+      return {
+        label: "Ready",
+        title: outputTarget === "world" ? "Sketch to 3D world" : "Sketch to image",
+        detail:
+          outputTarget === "world"
+            ? "Choose the destination, hit start, and let the image step stay hidden behind the world build."
+            : "Choose the destination, hit start, and stop once the scene is ready for the final image."
+      };
+    case "recording":
+      return {
+        label: "Recording",
+        title: "Live capture in progress",
+        detail: "Every stroke and spoken word is landing on the same timeline. Draw naturally, then stop when the scene is complete."
+      };
+    case "uploading":
+      return {
+        label: "Uploading",
+        title: "Sending the session",
+        detail: "Audio, sketch, and drawing events are being uploaded to the server."
+      };
+    case "processing":
+      return {
+        label: "Transcribing",
+        title: "Understanding the narration",
+        detail: "The recording is being transcribed so the sketch can be grounded against what was said."
+      };
+    case "creating":
+      return {
+        label: outputTarget === "world" ? "World build" : "Image build",
+        title: outputTarget === "world" ? "Building the hidden image step" : "Generating the final image",
+        detail:
+          outputTarget === "world"
+            ? "The grounded image is being generated and handed off to World Labs so the world job can start."
+            : "The grounded sketch is being turned into the final rendered image."
+      };
+    case "error":
+      return {
+        label: "Error",
+        title: "The session stopped early",
+        detail: errorMessage || "Something went wrong while finishing the capture."
+      };
+  }
+}
 
 function statusLabel(status: SessionSummary["status"]) {
   switch (status) {
@@ -57,17 +107,19 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   const sessionIdRef = useRef<string | null>(null);
   const startedAtRef = useRef<number | null>(null);
 
-  const [phase, setPhase] = useState<"idle" | "recording" | "uploading" | "processing" | "error">("idle");
-  const [tool, setTool] = useState<DrawingTool>("pen");
-  const [color, setColor] = useState(PEN_COLORS[0]);
-  const [brushWidth, setBrushWidth] = useState(6);
+  const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
+  const [outputTarget, setOutputTarget] = useState<OutputTarget>("world");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [liveStrokeCount, setLiveStrokeCount] = useState(0);
   const [canRedo, setCanRedo] = useState(false);
   const [sessions, setSessions] = useState(initialSessions);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [activeDrawer, setActiveDrawer] = useState<"recent" | "settings" | null>(null);
+  const tool: DrawingTool = "pen";
+  const color = DEFAULT_PEN_COLOR;
+  const brushWidth = 6;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -147,6 +199,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
 
   async function startRecording() {
     setErrorMessage(null);
+    setActiveDrawer(null);
 
     try {
       const sessionResponse = await fetch("/api/sessions", {
@@ -238,8 +291,37 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
             throw new Error(payload.error || "Failed to transcribe the recording.");
           }
 
+          setPhase("creating");
+
+          const createResponse = await fetch(`/api/sessions/${activeSessionId}/create`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              target: outputTarget,
+              reasoningEffort: analysisReasoningEffort,
+              imageSizePreset
+            })
+          });
+
+          const createPayload = await createResponse.json().catch(() => ({}));
+          if (!createResponse.ok) {
+            throw new Error(
+              createPayload.error ||
+                (outputTarget === "world"
+                  ? "Failed to create the 3D world from this session."
+                  : "Failed to generate the image from this session.")
+            );
+          }
+
           await refreshRecentSessions();
-          router.push(`/sessions/${activeSessionId}`);
+          if (outputTarget === "world" && createPayload.job?.id) {
+            router.push(`/sessions/${activeSessionId}/worlds/${createPayload.job.id}`);
+            return;
+          }
+
+          router.push(`/sessions/${activeSessionId}/image`);
         } catch (error) {
           setPhase("error");
           setErrorMessage(error instanceof Error ? error.message : "Failed to finish the session.");
@@ -270,6 +352,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   }
 
   function stopRecording() {
+    setActiveDrawer(null);
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") {
       return;
@@ -369,158 +452,43 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     });
   }
 
-  const isBusy = phase === "uploading" || phase === "processing";
+  const isBusy = phase === "uploading" || phase === "processing" || phase === "creating";
+  const phaseCopy = getPhaseCopy(phase, outputTarget, errorMessage);
+  const isRecording = phase === "recording";
+  const boardOverlayVisible = phase === "uploading" || phase === "processing" || phase === "creating" || phase === "error";
 
   return (
-    <main className="page-shell">
-      <section className="hero-card">
-        <div className="hero-copy">
-          <p className="eyebrow">Synk Demo</p>
-          <h1>Record the board and the voice on one timeline.</h1>
-          <p className="hero-text">
-            Start a live session, sketch while speaking, then jump straight into replay with synced audio,
-            tokens, and strokes.
-          </p>
-        </div>
-        <div className="hero-metrics">
-          <div className="metric-panel">
-            <span>Timer</span>
-            <strong>{formatDuration(elapsedMs)}</strong>
-          </div>
-          <div className="metric-panel">
-            <span>Strokes</span>
-            <strong>{liveStrokeCount}</strong>
-          </div>
-          <div className="metric-panel">
-            <span>Status</span>
-            <strong>{phase}</strong>
-          </div>
-        </div>
-      </section>
+    <main className="recorder-experience-page">
+      <div className="recorder-experience-stage">
+        <div className="recorder-experience-grid" />
+        <div className="recorder-experience-glow" />
 
-      <section className="workspace-grid">
-        <div className="panel canvas-panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-kicker">Recorder</p>
-              <h2>Live whiteboard</h2>
-            </div>
-            <div className="status-chip">{phase === "idle" ? "Ready to record" : phase}</div>
+        <header className="recorder-experience-header">
+          <div className="recorder-brandline">
+            <div className="recorder-brand-mark">Synk</div>
+            <p className="recorder-brand-copy-inline">Sketch and speak into an image or a 3D world.</p>
           </div>
 
-          <div className="toolbar-row">
-            <div className="segmented-control">
-              <button
-                type="button"
-                className={tool === "pen" ? "active" : ""}
-                onClick={() => setTool("pen")}
-                disabled={isBusy}
-              >
-                Pen
-              </button>
-              <button
-                type="button"
-                className={tool === "eraser" ? "active" : ""}
-                onClick={() => setTool("eraser")}
-                disabled={isBusy}
-              >
-                Eraser
-              </button>
-            </div>
-
-            <div className="color-row">
-              {PEN_COLORS.map((penColor) => (
-                <button
-                  key={penColor}
-                  type="button"
-                  className={`color-swatch ${color === penColor ? "selected" : ""}`}
-                  style={{ backgroundColor: penColor }}
-                  onClick={() => setColor(penColor)}
-                  disabled={tool === "eraser" || isBusy}
-                  aria-label={`Select ${penColor}`}
-                />
-              ))}
-            </div>
-
-            <label className="range-control">
-              <span>Brush</span>
-              <input
-                type="range"
-                min={2}
-                max={24}
-                step={1}
-                value={brushWidth}
-                onChange={(event) => setBrushWidth(Number.parseInt(event.target.value, 10))}
-                disabled={isBusy}
-              />
-              <strong>{brushWidth}px</strong>
-            </label>
-          </div>
-
-          <div className="action-row">
-            {phase === "idle" || phase === "error" ? (
-              <button type="button" className="primary-button" onClick={startRecording}>
-                Start session
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="primary-button stop-button"
-                onClick={stopRecording}
-                disabled={isBusy}
-              >
-                Stop and process
-              </button>
-            )}
-
-            <button type="button" className="ghost-button" onClick={handleUndo} disabled={phase !== "recording"}>
-              Undo
+          <div className="recorder-header-actions">
+            <button
+              type="button"
+              className="recorder-hud-button"
+              onClick={() => setActiveDrawer(activeDrawer === "recent" ? null : "recent")}
+            >
+              Recent
             </button>
-            <button type="button" className="ghost-button" onClick={handleRedo} disabled={phase !== "recording" || !canRedo}>
-              Redo
-            </button>
-            <button type="button" className="ghost-button" onClick={handleClear} disabled={phase !== "recording"}>
-              Clear
+            <button
+              type="button"
+              className="recorder-hud-button"
+              onClick={() => setActiveDrawer(activeDrawer === "settings" ? null : "settings")}
+            >
+              Settings
             </button>
           </div>
+        </header>
 
-          <div className="analysis-options-grid">
-            <div className="analysis-option-group">
-              <span className="analysis-option-label">Reasoning effort</span>
-              <div className="segmented-control">
-                {REASONING_EFFORTS.map((effort) => (
-                  <button
-                    key={effort}
-                    type="button"
-                    className={analysisReasoningEffort === effort ? "active" : ""}
-                    onClick={() => setAnalysisReasoningEffort(effort)}
-                    disabled={phase === "recording" || isBusy}
-                  >
-                    {effort}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="analysis-option-group">
-              <span className="analysis-option-label">Image size</span>
-              <div className="segmented-control">
-                {IMAGE_SIZE_PRESETS.map((preset) => (
-                  <button
-                    key={preset}
-                    type="button"
-                    className={imageSizePreset === preset ? "active" : ""}
-                    onClick={() => setImageSizePreset(preset)}
-                    disabled={phase === "recording" || isBusy}
-                  >
-                    {preset}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="canvas-frame">
+        <section className="recorder-board-stage">
+          <div className="canvas-frame recorder-board-frame">
             <canvas
               ref={canvasRef}
               width={DEMO_CANVAS.width}
@@ -531,46 +499,189 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
               onPointerUp={finishStroke}
               onPointerCancel={finishStroke}
             />
+
+            {boardOverlayVisible ? (
+              <div className="recorder-board-overlay">
+                <div className="recorder-board-overlay-card">
+                  <p className="recorder-board-kicker">{phaseCopy.label}</p>
+                  <h2>{phaseCopy.title}</h2>
+                  <p>{phaseCopy.detail}</p>
+                </div>
+              </div>
+            ) : null}
           </div>
+        </section>
 
-          <div className="footnote-row">
-            <span>Chrome demo path: MediaRecorder + local event timeline + server transcription.</span>
-            <span>No live subtitles while recording.</span>
-          </div>
+        {errorMessage ? <div className="recorder-floating-alert">{errorMessage}</div> : null}
 
-          {errorMessage ? <p className="error-banner">{errorMessage}</p> : null}
-        </div>
-
-        <aside className="panel session-panel">
-          <div className="panel-header">
-            <div>
-              <p className="panel-kicker">Recent</p>
-              <h2>Saved sessions</h2>
+        <div className="recorder-bottom-dock">
+          <div className="recorder-target-cluster">
+            <span className="recorder-dock-label">Destination</span>
+            <div className="segmented-control">
+              <button
+                type="button"
+                className={outputTarget === "image" ? "active" : ""}
+                onClick={() => setOutputTarget("image")}
+                disabled={isRecording || isBusy}
+              >
+                Image
+              </button>
+              <button
+                type="button"
+                className={outputTarget === "world" ? "active" : ""}
+                onClick={() => setOutputTarget("world")}
+                disabled={isRecording || isBusy}
+              >
+                3D world
+              </button>
             </div>
-            <button type="button" className="ghost-button" onClick={refreshRecentSessions}>
-              Refresh
+          </div>
+
+          <div className="recorder-live-meta">
+            <div className="recorder-chip">
+              <span>Timer</span>
+              <strong>{formatDuration(elapsedMs)}</strong>
+            </div>
+            <div className="recorder-chip">
+              <span>Strokes</span>
+              <strong>{liveStrokeCount}</strong>
+            </div>
+          </div>
+
+          {phase === "idle" || phase === "error" ? (
+            <button type="button" className="primary-button recorder-primary-button" onClick={startRecording}>
+              {outputTarget === "world" ? "Start sketch to 3D world" : "Start sketch to image"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="primary-button stop-button recorder-primary-button"
+              onClick={stopRecording}
+              disabled={isBusy}
+            >
+              {outputTarget === "world" ? "Stop and build 3D world" : "Stop and generate image"}
+            </button>
+          )}
+
+          <div className="recorder-history-actions">
+            <button type="button" className="recorder-dock-button" onClick={handleUndo} disabled={!isRecording}>
+              Undo
+            </button>
+            <button type="button" className="recorder-dock-button" onClick={handleRedo} disabled={!isRecording || !canRedo}>
+              Redo
+            </button>
+            <button type="button" className="recorder-dock-button" onClick={handleClear} disabled={!isRecording}>
+              Clear
             </button>
           </div>
+        </div>
 
-          <div className="session-list">
-            {sessions.length === 0 ? (
-              <p className="empty-copy">No sessions yet. Record one to populate the replay list.</p>
-            ) : (
-              sessions.map((session) => (
-                <Link key={session.id} href={`/sessions/${session.id}`} className="session-link">
-                  <div>
-                    <p className="session-title">{session.title}</p>
-                    <p className="session-meta">
-                      {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)}
-                    </p>
+        {activeDrawer ? <button type="button" className="recorder-drawer-scrim" onClick={() => setActiveDrawer(null)} /> : null}
+
+        <aside className={`recorder-drawer ${activeDrawer ? "open" : ""}`}>
+          {activeDrawer === "recent" ? (
+            <>
+              <div className="recorder-drawer-header">
+                <div>
+                  <p className="recorder-drawer-kicker">Recent</p>
+                  <h2>Saved sessions</h2>
+                </div>
+                <div className="recorder-drawer-actions">
+                  <button type="button" className="recorder-hud-button" onClick={refreshRecentSessions}>
+                    Refresh
+                  </button>
+                  <button type="button" className="recorder-hud-button" onClick={() => setActiveDrawer(null)}>
+                    Close
+                  </button>
+                </div>
+              </div>
+
+              <div className="recorder-drawer-body">
+                <div className="session-list">
+                  {sessions.length === 0 ? (
+                    <p className="empty-copy">No sessions yet. Record one to populate the replay list.</p>
+                  ) : (
+                    sessions.map((session) => (
+                      <Link
+                        key={session.id}
+                        href={(session.preferredResultUrl ?? `/sessions/${session.id}`) as Route}
+                        className="session-link"
+                        onClick={() => setActiveDrawer(null)}
+                      >
+                        <div>
+                          <p className="session-title">{session.title}</p>
+                          <p className="session-meta">
+                            {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)}
+                          </p>
+                        </div>
+                        <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
+                      </Link>
+                    ))
+                  )}
+                </div>
+              </div>
+            </>
+          ) : null}
+
+          {activeDrawer === "settings" ? (
+            <>
+              <div className="recorder-drawer-header">
+                <div>
+                  <p className="recorder-drawer-kicker">Settings</p>
+                  <h2>Generation controls</h2>
+                </div>
+                <button type="button" className="recorder-hud-button" onClick={() => setActiveDrawer(null)}>
+                  Close
+                </button>
+              </div>
+
+              <div className="recorder-drawer-body recorder-settings-body">
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Reasoning effort</span>
+                  <div className="segmented-control">
+                    {REASONING_EFFORTS.map((effort) => (
+                      <button
+                        key={effort}
+                        type="button"
+                        className={analysisReasoningEffort === effort ? "active" : ""}
+                        onClick={() => setAnalysisReasoningEffort(effort)}
+                        disabled={isRecording || isBusy}
+                      >
+                        {effort}
+                      </button>
+                    ))}
                   </div>
-                  <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
-                </Link>
-              ))
-            )}
-          </div>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Image size</span>
+                  <div className="segmented-control">
+                    {IMAGE_SIZE_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className={imageSizePreset === preset ? "active" : ""}
+                        onClick={() => setImageSizePreset(preset)}
+                        disabled={isRecording || isBusy}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Pipeline</span>
+                  <p className="recorder-settings-copy">
+                    Chrome demo path: MediaRecorder, local drawing timeline, server transcription, grounded image
+                    generation, and optional World Labs world build.
+                  </p>
+                </section>
+              </div>
+            </>
+          ) : null}
         </aside>
-      </section>
+      </div>
     </main>
   );
 }

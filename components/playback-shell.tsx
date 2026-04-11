@@ -10,7 +10,8 @@ import {
   ImageGenerationSource,
   ImageSizePreset,
   SessionDetail,
-  TranscriptToken
+  TranscriptToken,
+  WorldJob
 } from "@/lib/types";
 
 type AssetView = "sketch" | "annotatedSketch" | "generatedLabeled" | "generatedPlain";
@@ -33,6 +34,28 @@ function formatCreatedAt(isoString: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(isoString));
+}
+
+function formatRelativeDate(isoString: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(isoString));
+}
+
+function worldStatusLabel(status: WorldJob["status"]) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Running";
+    case "succeeded":
+      return "Ready";
+    case "failed":
+      return "Failed";
+  }
 }
 
 function isAssetViewAvailable(session: SessionDetail, view: AssetView) {
@@ -86,8 +109,6 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [generationSourceBusy, setGenerationSourceBusy] = useState<ImageGenerationSource | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
-  const autoAnalyzeAttemptRef = useRef<string | null>(null);
-  const autoGenerateLabeledAttemptRef = useRef<string | null>(null);
 
   function cancelPlaybackLoop() {
     if (animationFrameRef.current) {
@@ -328,58 +349,6 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
     }
   })();
 
-  useEffect(() => {
-    const nextAutoAnalyzeKey = `${sessionData.id}:${reasoningEffort}`;
-    const shouldAutoAnalyze =
-      sessionData.transcript.length > 0 &&
-      !sessionData.analysis &&
-      !analysisBusy &&
-      generationSourceBusy === null &&
-      autoAnalyzeAttemptRef.current !== nextAutoAnalyzeKey;
-
-    if (!shouldAutoAnalyze) {
-      return;
-    }
-
-    autoAnalyzeAttemptRef.current = nextAutoAnalyzeKey;
-    void runAnalysis({ background: true });
-  }, [
-    analysisBusy,
-    generationSourceBusy,
-    reasoningEffort,
-    sessionData.analysis,
-    sessionData.id,
-    sessionData.transcript.length
-  ]);
-
-  useEffect(() => {
-    const analysisCreatedAt = sessionData.analysis?.createdAt;
-    if (!analysisCreatedAt) {
-      return;
-    }
-
-    const nextAutoGenerateKey = `${sessionData.id}:${analysisCreatedAt}:${imageSizePreset}:labeled`;
-    const shouldAutoGenerateLabeled =
-      !analysisBusy &&
-      generationSourceBusy === null &&
-      !sessionData.generatedImageLabeledUrl &&
-      autoGenerateLabeledAttemptRef.current !== nextAutoGenerateKey;
-
-    if (!shouldAutoGenerateLabeled) {
-      return;
-    }
-
-    autoGenerateLabeledAttemptRef.current = nextAutoGenerateKey;
-    void runImageGeneration("labeled", { background: true });
-  }, [
-    analysisBusy,
-    generationSourceBusy,
-    imageSizePreset,
-    sessionData.analysis?.createdAt,
-    sessionData.generatedImageLabeledUrl,
-    sessionData.id
-  ]);
-
   function renderObjectCard(object: GroundedSceneObject) {
     return (
       <article key={object.id} className="analysis-card">
@@ -570,6 +539,14 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               <button
                 type="button"
                 className="ghost-button"
+                onClick={() => runImageGeneration("labeled")}
+                disabled={analysisBusy || generationSourceBusy !== null}
+              >
+                {generationSourceBusy === "labeled" ? "Generating labeled..." : "Generate labeled image"}
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
                 onClick={() => runImageGeneration("plain")}
                 disabled={!sessionData.analysis || analysisBusy || generationSourceBusy !== null}
               >
@@ -622,12 +599,14 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
                 {analysisBusy
                   ? `Analysis is running in the background with ${reasoningEffort} reasoning.`
                   : generationSourceBusy === "labeled"
-                    ? `Analysis is ready and the labeled result is generating automatically at ${imageSizePreset} size.`
-                  : sessionData.analysis
-                    ? sessionData.generatedImageLabeledUrl
-                      ? "Analysis is ready and the labeled result has already been generated. Expand this panel to inspect objects, evidence, and the generation prompt."
-                      : "Analysis is ready. The labeled result will generate automatically; expand this panel to inspect objects, evidence, and the generation prompt."
-                    : "Analysis will run automatically after transcription, then the labeled result will generate automatically."}
+                    ? `The labeled result is generating at ${imageSizePreset} size.`
+                    : generationSourceBusy === "plain"
+                      ? `The plain image result is generating at ${imageSizePreset} size.`
+                      : sessionData.analysis
+                        ? sessionData.generatedImageLabeledUrl
+                          ? "Analysis is ready and the labeled image has already been generated. Expand this panel to inspect objects, evidence, and the generation prompt."
+                          : "Analysis is ready. Generate an image when you want to continue, or browse the world history below."
+                        : "Run analysis here when you want to inspect or refine the scene understanding manually."}
               </p>
             </div>
           ) : sessionData.analysis ? (
@@ -738,6 +717,43 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               )}
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="panel world-launch-panel">
+        <div className="panel-header">
+          <div>
+            <p className="panel-kicker">3D Worlds</p>
+            <h2>Open immersive worlds generated from this session</h2>
+          </div>
+        </div>
+
+        <div className="world-job-list">
+          {sessionData.worldJobs.filter((job) => job.modelPreset === "hd").length === 0 ? (
+            <div className="analysis-summary-card">
+              <p className="analysis-copy">
+                No HD worlds yet. Use the creation panel above to generate a full 3D world directly from the sketch
+                session.
+              </p>
+            </div>
+          ) : (
+            sessionData.worldJobs
+              .filter((job) => job.modelPreset === "hd")
+              .map((job) => (
+              <Link key={job.id} href={`/sessions/${sessionData.id}/worlds/${job.id}`} className="world-job-link">
+                <div>
+                  <p className="session-title">{job.displayName}</p>
+                  <p className="session-meta">
+                    {formatRelativeDate(job.createdAt)} · HD ·{" "}
+                    {job.sourceAssetKind === "generatedImageLabeled" ? "Labeled image" : "Plain image"}
+                  </p>
+                </div>
+                <span className={`status-badge status-${job.status === "succeeded" ? "ready" : job.status}`}>
+                  {worldStatusLabel(job.status)}
+                </span>
+              </Link>
+            ))
+          )}
         </div>
       </section>
     </main>

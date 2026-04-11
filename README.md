@@ -11,6 +11,7 @@ An internal demo for recording drawing events and microphone audio on the same t
 - Uses `gpt-5.4` to extract scene objects, object descriptions, evidence quotes, and global scene info from the full transcript.
 - Grounds extracted objects back to stroke clusters and renders an annotated sketch with object tags.
 - Uses the Responses API image generation tool with `gpt-5.4` orchestration to edit the labeled sketch into a final image.
+- Can send the generated image to the World Labs Marble API and open the result as an explorable 3D world.
 - Falls back to a placeholder transcript when no API key is configured.
 
 ## Quick start
@@ -41,6 +42,7 @@ npm run start
 6. Record a session, then open the playback page and use:
    - `Analyze with GPT-5.4`
    - `Generate image`
+   - `Preview 3D world` or `Generate HD world`
 
 ## Environment
 
@@ -51,6 +53,11 @@ npm run start
   Default: `gpt-5.4`
 - `OPENAI_IMAGE_ORCHESTRATOR_MODEL`
   Default: `gpt-5.4`
+- `WORLDLABS_API_KEY`
+- `WORLDLABS_MODEL_DRAFT`
+  Default: `marble-1.0-draft`
+- `WORLDLABS_MODEL_HD`
+  Default: `marble-1.1-plus`
 - `SESSION_DATA_ROOT`
   Default: `./data/sessions`
 
