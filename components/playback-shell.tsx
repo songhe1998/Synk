@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { applyDrawingEvent, createEmptyDrawingState, drawDrawingState, formatDuration } from "@/lib/drawing";
 import {
@@ -11,12 +12,23 @@ import {
   ImageSizePreset,
   SessionDetail,
   TranscriptToken,
+  VideoJob,
+  VideoModelPreset,
+  VideoPipelineMode,
   WorldJob
 } from "@/lib/types";
 
-type AssetView = "sketch" | "annotatedSketch" | "generatedLabeled" | "generatedPlain";
+type AssetView =
+  | "sketch"
+  | "annotatedSketch"
+  | "videoAnnotatedSketch"
+  | "generatedLabeled"
+  | "generatedPlain"
+  | "generatedVideoSource";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
+const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["lite", "quality"];
+const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 
 function getActiveTokenIndex(tokens: TranscriptToken[], currentTimeMs: number) {
   return tokens.findIndex((token, index) => {
@@ -58,23 +70,44 @@ function worldStatusLabel(status: WorldJob["status"]) {
   }
 }
 
+function videoStatusLabel(status: VideoJob["status"]) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "uploading":
+      return "Uploading";
+    case "running":
+      return "Running";
+    case "succeeded":
+      return "Ready";
+    case "failed":
+      return "Failed";
+  }
+}
+
 function isAssetViewAvailable(session: SessionDetail, view: AssetView) {
   switch (view) {
     case "sketch":
       return Boolean(session.sketchUrl);
     case "annotatedSketch":
       return Boolean(session.annotatedSketchUrl);
+    case "videoAnnotatedSketch":
+      return Boolean(session.videoAnnotatedSketchUrl);
     case "generatedLabeled":
       return Boolean(session.generatedImageLabeledUrl);
     case "generatedPlain":
       return Boolean(session.generatedImagePlainUrl);
+    case "generatedVideoSource":
+      return Boolean(session.generatedVideoSourceImageUrl);
   }
 }
 
 function getDefaultAssetView(session: SessionDetail) {
   const priority: AssetView[] = [
+    "generatedVideoSource",
     "generatedLabeled",
     "generatedPlain",
+    "videoAnnotatedSketch",
     "annotatedSketch",
     "sketch"
   ];
@@ -89,10 +122,13 @@ function resolveAssetView(session: SessionDetail, preferred: AssetView | null) {
 }
 
 export function PlaybackShell({ session }: { session: SessionDetail }) {
+  const router = useRouter();
   const [sessionData, setSessionData] = useState(session);
   const [selectedAssetView, setSelectedAssetView] = useState<AssetView>(() => getDefaultAssetView(session));
   const [reasoningEffort, setReasoningEffort] = useState<AnalysisReasoningEffort>(session.analysisReasoningEffort);
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>(session.imageSizePreset);
+  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("lite");
+  const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [analysisExpanded, setAnalysisExpanded] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -108,6 +144,7 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [generationSourceBusy, setGenerationSourceBusy] = useState<ImageGenerationSource | null>(null);
+  const [videoBusy, setVideoBusy] = useState(false);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   function cancelPlaybackLoop() {
@@ -319,6 +356,35 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
     }
   }
 
+  async function startVideoGeneration() {
+    setPipelineError(null);
+    setVideoBusy(true);
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionData.id}/videos`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          modelPreset: videoModelPreset,
+          pipelineMode: videoPipelineMode
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Video generation failed.");
+      }
+
+      const job = payload as VideoJob;
+      router.push(`/sessions/${sessionData.id}/videos/${job.id}`);
+    } catch (error) {
+      setPipelineError(error instanceof Error ? error.message : "Video generation failed.");
+    } finally {
+      setVideoBusy(false);
+    }
+  }
+
   const currentAsset = (() => {
     switch (selectedAssetView) {
       case "generatedLabeled":
@@ -332,6 +398,18 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
           title: "Generated from plain sketch",
           url: sessionData.generatedImagePlainUrl,
           alt: "Generated scene using plain sketch"
+        };
+      case "generatedVideoSource":
+        return {
+          title: "Video source image",
+          url: sessionData.generatedVideoSourceImageUrl,
+          alt: "Generated video source image"
+        };
+      case "videoAnnotatedSketch":
+        return {
+          title: "Video labeled sketch",
+          url: sessionData.videoAnnotatedSketchUrl,
+          alt: "Video labeled sketch"
         };
       case "annotatedSketch":
         return {
@@ -692,6 +770,14 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               </button>
               <button
                 type="button"
+                className={selectedAssetView === "videoAnnotatedSketch" ? "active" : ""}
+                onClick={() => setSelectedAssetView("videoAnnotatedSketch")}
+                disabled={!sessionData.videoAnnotatedSketchUrl}
+              >
+                Video sketch
+              </button>
+              <button
+                type="button"
                 className={selectedAssetView === "generatedLabeled" ? "active" : ""}
                 onClick={() => setSelectedAssetView("generatedLabeled")}
                 disabled={!sessionData.generatedImageLabeledUrl}
@@ -706,6 +792,14 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               >
                 Plain result
               </button>
+              <button
+                type="button"
+                className={selectedAssetView === "generatedVideoSource" ? "active" : ""}
+                onClick={() => setSelectedAssetView("generatedVideoSource")}
+                disabled={!sessionData.generatedVideoSourceImageUrl}
+              >
+                Video source
+              </button>
             </div>
 
             <div className="asset-card asset-preview-card">
@@ -717,6 +811,147 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               )}
             </div>
           </div>
+        </div>
+      </section>
+
+      <section className="panel world-launch-panel">
+        <div className="panel-header">
+          <div>
+            <p className="panel-kicker">Video</p>
+            <h2>Create motion from the generated image</h2>
+          </div>
+        </div>
+
+        <div className="creation-layout">
+          <div className="creation-summary">
+            <p className="analysis-title">Pipeline</p>
+            <p className="analysis-copy">
+              {videoPipelineMode === "dynamic" ? (
+                <>
+                  Video generation now runs its dynamic path:
+                  {" "}
+                  <code>
+                    plain sketch + transcript -&gt; video source plan -&gt; video labeled sketch -&gt; video
+                    source image -&gt; final video prompt
+                  </code>
+                  .
+                </>
+              ) : (
+                <>
+                  Video generation now runs its normal path:
+                  {" "}
+                  <code>regular image pipeline -&gt; final video prompt from source-image prompt + transcript</code>.
+                </>
+              )}
+            </p>
+            {sessionData.analysis?.transcriptText ? (
+              <div className="analysis-summary-card">
+                <p className="analysis-subtitle">Transcript</p>
+                <p className="analysis-copy">{sessionData.analysis.transcriptText}</p>
+              </div>
+            ) : (
+              <p className="empty-copy">Transcript is required before generating a video.</p>
+            )}
+            {sessionData.generatedVideoSourceImageUrl ? (
+              <div className="analysis-summary-card">
+                <p className="analysis-subtitle">Cached video source image</p>
+                <img
+                  src={sessionData.generatedVideoSourceImageUrl}
+                  alt="Video source image"
+                  className="asset-image"
+                />
+              </div>
+            ) : null}
+            <p className="creation-footnote">
+              {videoPipelineMode === "dynamic"
+                ? "Dynamic mode uses the heavier motion-aware source-image planner and the video labeled sketch path. Keep Lite as the low-cost validation pass before Quality."
+                : "Normal mode reuses the regular image pipeline and only adds a lightweight video prompt writer on top. This is the default path while the dynamic pipeline is still being tuned."}
+            </p>
+          </div>
+
+          <div className="creation-actions">
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Pipeline</span>
+              <div className="segmented-control">
+                {VIDEO_PIPELINE_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={videoPipelineMode === mode ? "active" : ""}
+                    onClick={() => setVideoPipelineMode(mode)}
+                    disabled={videoBusy}
+                  >
+                    {mode === "normal" ? "Normal" : "Dynamic"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Model</span>
+              <div className="segmented-control">
+                {VIDEO_MODEL_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={videoModelPreset === preset ? "active" : ""}
+                    onClick={() => setVideoModelPreset(preset)}
+                    disabled={videoBusy}
+                  >
+                    {preset === "quality" ? "Quality" : "Lite"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              className="primary-button creation-primary-button"
+              onClick={startVideoGeneration}
+              disabled={videoBusy || !sessionData.transcript.length}
+            >
+              {videoBusy ? "Starting video..." : `Generate ${videoModelPreset === "quality" ? "quality" : "lite"} video`}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel world-launch-panel">
+        <div className="panel-header">
+          <div>
+            <p className="panel-kicker">Video Jobs</p>
+            <h2>Open generated videos from this session</h2>
+          </div>
+        </div>
+
+        <div className="world-job-list">
+          {sessionData.videoJobs.length === 0 ? (
+            <div className="analysis-summary-card">
+              <p className="analysis-copy">
+                No videos yet. Generate one from the panel above after you have a source image you trust.
+              </p>
+            </div>
+          ) : (
+            sessionData.videoJobs.map((job) => (
+              <Link key={job.id} href={`/sessions/${sessionData.id}/videos/${job.id}`} className="world-job-link">
+                <div>
+                  <p className="session-title">{job.displayName}</p>
+                  <p className="session-meta">
+                    {formatRelativeDate(job.createdAt)} · {job.pipelineMode === "dynamic" ? "Dynamic" : "Normal"} ·{" "}
+                    {job.modelPreset === "quality" ? "Quality" : "Lite"} ·{" "}
+                    {job.sourceAssetKind === "generatedVideoSourceImage"
+                      ? "Video source image"
+                      : job.sourceAssetKind === "generatedImageLabeled"
+                        ? "Labeled image"
+                        : "Plain image"}
+                  </p>
+                </div>
+                <span className={`status-badge status-${job.status === "succeeded" ? "ready" : job.status}`}>
+                  {videoStatusLabel(job.status)}
+                </span>
+              </Link>
+            ))
+          )}
         </div>
       </section>
 

@@ -7,12 +7,16 @@ function toAssetKind(assetName: string): AssetKind | null {
       return "sketch";
     case "annotatedSketch":
       return "annotatedSketch";
+    case "videoAnnotatedSketch":
+      return "videoAnnotatedSketch";
     case "generatedImage":
       return "generatedImage";
     case "generatedImageLabeled":
       return "generatedImageLabeled";
     case "generatedImagePlain":
       return "generatedImagePlain";
+    case "generatedVideoSourceImage":
+      return "generatedVideoSourceImage";
     default:
       return null;
   }

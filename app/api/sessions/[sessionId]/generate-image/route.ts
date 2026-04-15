@@ -1,9 +1,19 @@
 import { ensureSessionGeneratedImage } from "@/lib/session-pipeline";
-import { ImageGenerationSource, ImageSizePreset } from "@/lib/types";
+import { ImageGenerationProfile, ImageGenerationSource, ImageSizePreset } from "@/lib/types";
 import { NextResponse } from "next/server";
 
 function parseImageSizePreset(value: unknown): ImageSizePreset | undefined {
   return value === "small" || value === "medium" || value === "large" ? value : undefined;
+}
+
+function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | undefined {
+  if (value === "fast") {
+    return "fast";
+  }
+  if (value === "pro" || value === "quality") {
+    return "pro";
+  }
+  return undefined;
 }
 
 export async function POST(
@@ -21,7 +31,8 @@ export async function POST(
     const updatedSession = await ensureSessionGeneratedImage({
       sessionId,
       source,
-      imageSizePreset: parseImageSizePreset(body?.imageSizePreset)
+      imageSizePreset: parseImageSizePreset(body?.imageSizePreset),
+      imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile)
     });
     return NextResponse.json(updatedSession);
   } catch (error) {

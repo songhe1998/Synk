@@ -10,14 +10,20 @@ import {
   DrawingEvent,
   DrawingState,
   DrawingTool,
+  ImageGenerationProfile,
   ImageSizePreset,
-  SessionSummary
+  SessionSummary,
+  VideoModelPreset,
+  VideoPipelineMode
 } from "@/lib/types";
 
 const DEFAULT_PEN_COLOR = "#20222b";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
-type OutputTarget = "image" | "world";
+const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
+const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["lite", "quality"];
+const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
+type OutputTarget = "image" | "world" | "video";
 type RecorderPhase = "idle" | "recording" | "uploading" | "processing" | "creating" | "error";
 
 function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMessage: string | null) {
@@ -25,10 +31,17 @@ function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMes
     case "idle":
       return {
         label: "Ready",
-        title: outputTarget === "world" ? "Sketch to 3D world" : "Sketch to image",
+        title:
+          outputTarget === "world"
+            ? "Sketch to 3D world"
+            : outputTarget === "video"
+              ? "Sketch to video"
+              : "Sketch to image",
         detail:
           outputTarget === "world"
             ? "Choose the destination, hit start, and let the image step stay hidden behind the world build."
+            : outputTarget === "video"
+              ? "Choose the destination, hit start, and let the image step stay hidden behind the video build."
             : "Choose the destination, hit start, and stop once the scene is ready for the final image."
       };
     case "recording":
@@ -51,11 +64,16 @@ function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMes
       };
     case "creating":
       return {
-        label: outputTarget === "world" ? "World build" : "Image build",
-        title: outputTarget === "world" ? "Building the hidden image step" : "Generating the final image",
+        label: outputTarget === "world" ? "World build" : outputTarget === "video" ? "Video build" : "Image build",
+        title:
+          outputTarget === "world" || outputTarget === "video"
+            ? "Building the hidden image step"
+            : "Generating the final image",
         detail:
           outputTarget === "world"
             ? "The grounded image is being generated and handed off to World Labs so the world job can start."
+            : outputTarget === "video"
+              ? "The grounded image is being generated and handed off to MuAPI so the video job can start."
             : "The grounded sketch is being turned into the final rendered image."
       };
     case "error":
@@ -110,6 +128,9 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
+  const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("pro");
+  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("lite");
+  const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [outputTarget, setOutputTarget] = useState<OutputTarget>("world");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [liveStrokeCount, setLiveStrokeCount] = useState(0);
@@ -210,7 +231,8 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
         body: JSON.stringify({
           title: makeTitle(),
           analysisReasoningEffort,
-          imageSizePreset
+          imageSizePreset,
+          imageGenerationProfile
         })
       });
 
@@ -301,7 +323,10 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
             body: JSON.stringify({
               target: outputTarget,
               reasoningEffort: analysisReasoningEffort,
-              imageSizePreset
+              imageSizePreset,
+              imageGenerationProfile,
+              videoModelPreset,
+              videoPipelineMode
             })
           });
 
@@ -311,6 +336,8 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
               createPayload.error ||
                 (outputTarget === "world"
                   ? "Failed to create the 3D world from this session."
+                  : outputTarget === "video"
+                    ? "Failed to create the video from this session."
                   : "Failed to generate the image from this session.")
             );
           }
@@ -318,6 +345,11 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
           await refreshRecentSessions();
           if (outputTarget === "world" && createPayload.job?.id) {
             router.push(`/sessions/${activeSessionId}/worlds/${createPayload.job.id}`);
+            return;
+          }
+
+          if (outputTarget === "video" && createPayload.job?.id) {
+            router.push(`/sessions/${activeSessionId}/videos/${createPayload.job.id}`);
             return;
           }
 
@@ -534,6 +566,14 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
               >
                 3D world
               </button>
+              <button
+                type="button"
+                className={outputTarget === "video" ? "active" : ""}
+                onClick={() => setOutputTarget("video")}
+                disabled={isRecording || isBusy}
+              >
+                Video
+              </button>
             </div>
           </div>
 
@@ -550,7 +590,11 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
 
           {phase === "idle" || phase === "error" ? (
             <button type="button" className="primary-button recorder-primary-button" onClick={startRecording}>
-              {outputTarget === "world" ? "Start sketch to 3D world" : "Start sketch to image"}
+              {outputTarget === "world"
+                ? "Start sketch to 3D world"
+                : outputTarget === "video"
+                  ? "Start sketch to video"
+                  : "Start sketch to image"}
             </button>
           ) : (
             <button
@@ -559,7 +603,11 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
               onClick={stopRecording}
               disabled={isBusy}
             >
-              {outputTarget === "world" ? "Stop and build 3D world" : "Stop and generate image"}
+              {outputTarget === "world"
+                ? "Stop and build 3D world"
+                : outputTarget === "video"
+                  ? "Stop and build video"
+                  : "Stop and generate image"}
             </button>
           )}
 
@@ -637,6 +685,72 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
 
               <div className="recorder-drawer-body recorder-settings-body">
                 <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Video pipeline</span>
+                  <div className="segmented-control">
+                    {VIDEO_PIPELINE_MODES.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={videoPipelineMode === mode ? "active" : ""}
+                        onClick={() => setVideoPipelineMode(mode)}
+                        disabled={isRecording || isBusy}
+                      >
+                        {mode === "normal" ? "Normal" : "Dynamic"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="recorder-settings-copy">
+                    {videoPipelineMode === "normal"
+                      ? "Normal reuses the regular image pipeline, then writes a lightweight video prompt from the image scene prompt and transcript. This is the default path."
+                      : "Dynamic uses the heavier motion-aware source-image planner and labeled video sketch path. Keep it for deeper experiments while the motion staging is still being tuned."}
+                  </p>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Video model</span>
+                  <div className="segmented-control">
+                    {VIDEO_MODEL_PRESETS.map((preset) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className={videoModelPreset === preset ? "active" : ""}
+                        onClick={() => setVideoModelPreset(preset)}
+                        disabled={isRecording || isBusy}
+                      >
+                        {preset === "quality" ? "Quality" : "Lite"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="recorder-settings-copy">
+                    {videoModelPreset === "quality"
+                      ? "Quality uses Seedance 2 VIP Omni Reference Fast for the final pass. Keep this for the final effect check because it is materially more expensive."
+                      : "Lite uses Seedance Lite I2V for low-cost validation while the rest of the pipeline is still being verified."}
+                  </p>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Profile</span>
+                  <div className="segmented-control">
+                    {IMAGE_GENERATION_PROFILES.map((profile) => (
+                      <button
+                        key={profile}
+                        type="button"
+                        className={imageGenerationProfile === profile ? "active" : ""}
+                        onClick={() => setImageGenerationProfile(profile)}
+                        disabled={isRecording || isBusy}
+                      >
+                        {profile === "pro" ? "Pro" : "Fast"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="recorder-settings-copy">
+                    {imageGenerationProfile === "fast"
+                      ? "Fast uses GPT-5.4 mini plus GPT Image 1 mini, with inferred style, low-fidelity editing, and a square 1024 pass to cut latency and cost."
+                      : "Pro uses GPT-5.4 plus GPT Image 1.5, with the same inferred-style scene analysis and a higher-fidelity image pass for stronger final quality."}
+                  </p>
+                </section>
+
+                <section className="recorder-settings-section">
                   <span className="recorder-tool-label">Reasoning effort</span>
                   <div className="segmented-control">
                     {REASONING_EFFORTS.map((effort) => (
@@ -662,12 +776,17 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={imageSizePreset === preset ? "active" : ""}
                         onClick={() => setImageSizePreset(preset)}
-                        disabled={isRecording || isBusy}
+                        disabled={isRecording || isBusy || imageGenerationProfile === "fast"}
                       >
                         {preset}
                       </button>
                     ))}
                   </div>
+                  {imageGenerationProfile === "fast" ? (
+                    <p className="recorder-settings-copy">
+                      Fast uses a fixed 1024 square image pass to keep generation lean.
+                    </p>
+                  ) : null}
                 </section>
 
                 <section className="recorder-settings-section">

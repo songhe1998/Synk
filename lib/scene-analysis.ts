@@ -7,6 +7,7 @@ import {
   DrawingEvent,
   GlobalSceneInfo,
   GroundedSceneObject,
+  ImageGenerationProfile,
   ImageSizePreset,
   ImageGenerationSource,
   Point2D,
@@ -17,7 +18,12 @@ import {
 } from "@/lib/types";
 
 const SCENE_MODEL = process.env.OPENAI_SCENE_MODEL ?? "gpt-5.4";
+const FAST_SCENE_MODEL = process.env.OPENAI_FAST_SCENE_MODEL ?? "gpt-5.4-mini";
 const IMAGE_ORCHESTRATOR_MODEL = process.env.OPENAI_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4";
+const FAST_IMAGE_ORCHESTRATOR_MODEL =
+  process.env.OPENAI_FAST_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4-mini";
+const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-1.5";
+const FAST_IMAGE_TOOL_MODEL = process.env.OPENAI_FAST_IMAGE_TOOL_MODEL ?? "gpt-image-1-mini";
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const SKETCH_BACKGROUND = "#fff8e6";
 
@@ -63,6 +69,13 @@ interface LabelAnchorSelection {
   strokeId: string | null;
   bbox: BoundingBox | null;
   point: Point2D | null;
+}
+
+interface GroundingSeedObject {
+  tag: string;
+  label: string;
+  description?: string;
+  evidence_quotes: string[];
 }
 
 function escapeXml(value: string) {
@@ -240,6 +253,28 @@ function resolveImageToolSize(width: number, height: number, preset: ImageSizePr
   return inferLandscapeSize(width, height);
 }
 
+function resolveFastImageSize() {
+  return "1024x1024";
+}
+
+function buildImageSourceInstruction(
+  source: ImageGenerationSource,
+  profile: ImageGenerationProfile
+) {
+  const renderGuardrail =
+    profile === "fast"
+      ? "Render a finished scene, not a sketch, line drawing, diagram, blueprint, or storyboard frame. Do not preserve hand-drawn outlines."
+      : "";
+
+  if (source === "labeled") {
+    return `${renderGuardrail} Use the sketch lines and nearby labels only as layout and identity hints. Do not include any labels, text, dots, guide lines, or callout lines in the final image.`
+      .trim();
+  }
+
+  return `${renderGuardrail} Use the plain sketch lines and their relative positions as layout hints. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.`
+    .trim();
+}
+
 async function callResponsesApi(payload: object, apiKey: string) {
   const response = await fetch(RESPONSES_URL, {
     method: "POST",
@@ -281,19 +316,22 @@ Rules:
 - Keep object descriptions natural and concise.
 - Keep object tags short enough to draw on the sketch. Use spatial disambiguation only when needed, for example "left apple".
 - Put background, style, relationships, and story/mood into global_info.
-- Write generation_prompt as a natural paragraph that will help an image model follow the sketch layout and labels closely.
+- Infer the intended visual style from the transcript itself. Use explicit style requests when they exist, and otherwise infer a fitting finished-image style from the user's wording, mood, subject matter, and descriptive cues.
+- If the transcript does not provide meaningful style cues, keep the style natural and neutral rather than forcing a named style.
+- Write generation_prompt as a natural paragraph for a finished image that follows the sketch layout and labels closely. The prompt should describe the intended final image style, whether explicitly requested or reasonably inferred from the transcript.
 `.trim();
 
 export async function extractSceneFromTranscript(
   transcriptText: string,
   apiKey: string,
-  reasoningEffort: AnalysisReasoningEffort
+  reasoningEffort: AnalysisReasoningEffort,
+  profile: ImageGenerationProfile = "pro"
 ) {
   const payload = await callResponsesApi(
     {
-      model: SCENE_MODEL,
+      model: profile === "fast" ? FAST_SCENE_MODEL : SCENE_MODEL,
       reasoning: {
-        effort: reasoningEffort
+        effort: profile === "fast" ? "low" : reasoningEffort
       },
       store: false,
       instructions: SCENE_ANALYSIS_PROMPT,
@@ -487,9 +525,39 @@ export function groundSceneExtraction({
   extraction: SceneExtractionPayload;
 }): SceneAnalysis {
   const clusters = buildStrokeClusters(events);
+  const objects = groundObjectsFromTranscriptAndEvents({
+    transcript,
+    events,
+    objects: extraction.objects
+  });
+
+  return {
+    model: extractionModel,
+    createdAt: new Date().toISOString(),
+    transcriptText: buildDisplayTranscript(transcript),
+    objects,
+    globalInfo: extraction.global_info,
+    generationPrompt: `${extraction.generation_prompt.trim()} Follow the provided labeled sketch closely. Treat each label tag as the identity of the nearby object and preserve the overall layout. The label tags, callout lines, and any sketch annotations are only guidance and must not appear in the final rendered image.`,
+    notes: [
+      `Scene understanding generated with ${extractionModel}.`,
+      `Objects grounded against ${clusters.length} stroke clusters.`
+    ]
+  };
+}
+
+export function groundObjectsFromTranscriptAndEvents({
+  transcript,
+  events,
+  objects
+}: {
+  transcript: TranscriptToken[];
+  events: DrawingEvent[];
+  objects: GroundingSeedObject[];
+}) {
+  const clusters = buildStrokeClusters(events);
   const strokeMetrics = buildStrokeMetricsFromEvents(events);
 
-  const objects: GroundedSceneObject[] = extraction.objects.map((object, index) => {
+  return objects.map((object, index) => {
     const evidenceMatches = object.evidence_quotes.map((quote) => matchEvidenceQuote(transcript, quote));
     const validEvidence = evidenceMatches.filter(
       (match) => match.startMs !== null && match.endMs !== null
@@ -507,7 +575,7 @@ export function groundSceneExtraction({
       id: `object_${index + 1}`,
       tag: object.tag.trim(),
       label: object.label.trim(),
-      description: object.description.trim(),
+      description: object.description?.trim() || object.label.trim(),
       evidenceQuotes: object.evidence_quotes.map((quote) => quote.trim()).filter(Boolean),
       evidenceMatches,
       clusterIds,
@@ -518,19 +586,10 @@ export function groundSceneExtraction({
       labelAnchorPoint: labelAnchor.point
     };
   });
+}
 
-  return {
-    model: extractionModel,
-    createdAt: new Date().toISOString(),
-    transcriptText: buildDisplayTranscript(transcript),
-    objects,
-    globalInfo: extraction.global_info,
-    generationPrompt: `${extraction.generation_prompt.trim()} Follow the provided labeled sketch closely. Treat each label tag as the identity of the nearby object and preserve the overall layout. The label tags, callout lines, and any sketch annotations are only guidance and must not appear in the final rendered image.`,
-    notes: [
-      `Scene understanding generated with ${extractionModel}.`,
-      `Objects grounded against ${clusters.length} stroke clusters.`
-    ]
-  };
+function getObjectLabelText(object: Pick<GroundedSceneObject, "label" | "tag">) {
+  return object.label?.trim() || object.tag.trim();
 }
 
 function estimateTagDimensions(tag: string) {
@@ -553,7 +612,8 @@ function layoutLabels(objects: GroundedSceneObject[], canvasWidth: number, canva
       return;
     }
 
-    const { width, height } = estimateTagDimensions(object.tag);
+    const labelText = getObjectLabelText(object);
+    const { width, height } = estimateTagDimensions(labelText);
     const bbox = targetBbox;
     const center = targetPoint;
     const candidates: BoundingBox[] = [
@@ -654,8 +714,27 @@ export async function renderAnnotatedSketchPng({
   canvasWidth: number;
   canvasHeight: number;
 }) {
-  const labelLayouts = layoutLabels(analysis.objects, canvasWidth, canvasHeight);
-  const objectMap = new Map(analysis.objects.map((object) => [object.id, object]));
+  return renderGroundedSketchPng({
+    baseSketch,
+    objects: analysis.objects,
+    canvasWidth,
+    canvasHeight
+  });
+}
+
+export async function renderGroundedSketchPng({
+  baseSketch,
+  objects,
+  canvasWidth,
+  canvasHeight
+}: {
+  baseSketch: Buffer;
+  objects: GroundedSceneObject[];
+  canvasWidth: number;
+  canvasHeight: number;
+}) {
+  const labelLayouts = layoutLabels(objects, canvasWidth, canvasHeight);
+  const objectMap = new Map(objects.map((object) => [object.id, object]));
 
   const overlaySvg = `
     <svg xmlns="http://www.w3.org/2000/svg" width="${canvasWidth}" height="${canvasHeight}" viewBox="0 0 ${canvasWidth} ${canvasHeight}">
@@ -665,11 +744,12 @@ export async function renderAnnotatedSketchPng({
           if (!object) {
             return "";
           }
+          const labelText = getObjectLabelText(object);
           return `
             <line x1="${layout.leaderStart.x}" y1="${layout.leaderStart.y}" x2="${layout.leaderEnd.x}" y2="${layout.leaderEnd.y}" stroke="#2f6a52" stroke-width="2" stroke-linecap="round" />
             <circle cx="${layout.leaderEnd.x}" cy="${layout.leaderEnd.y}" r="4" fill="#2f6a52" />
             <rect x="${layout.box.x}" y="${layout.box.y}" rx="14" ry="14" width="${layout.box.width}" height="${layout.box.height}" fill="rgba(255,255,255,0.92)" stroke="#2f6a52" stroke-width="2" />
-            <text x="${layout.box.x + layout.box.width / 2}" y="${layout.box.y + 21}" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1f1f26">${escapeXml(object.tag)}</text>
+            <text x="${layout.box.x + layout.box.width / 2}" y="${layout.box.y + 21}" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1f1f26">${escapeXml(labelText)}</text>
           `.trim();
         })
         .join("")}
@@ -695,7 +775,8 @@ export async function generateImageFromSketch({
   width,
   height,
   source,
-  imageSizePreset
+  imageSizePreset,
+  profile = "pro"
 }: {
   prompt: string;
   sketchImage: Buffer;
@@ -704,15 +785,30 @@ export async function generateImageFromSketch({
   height: number;
   source: ImageGenerationSource;
   imageSizePreset: ImageSizePreset;
+  profile?: ImageGenerationProfile;
 }) {
-  const imageDataUrl = `data:image/png;base64,${sketchImage.toString("base64")}`;
-  const sourceInstruction =
-    source === "labeled"
-      ? "Use the sketch lines and nearby labels only as layout and identity hints. Do not include any labels, text, dots, guide lines, or callout lines in the final image."
-      : "Use the plain sketch lines and their relative positions as layout hints. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.";
+  const sourceInstruction = buildImageSourceInstruction(source, profile);
+  const imageToolSize =
+    profile === "fast" ? resolveFastImageSize() : resolveImageToolSize(width, height, imageSizePreset);
+  const preparedSketch =
+    profile === "fast"
+      ? await sharp(sketchImage)
+          .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
+          .png()
+          .toBuffer()
+      : sketchImage;
+  const imageDataUrl = `data:image/png;base64,${preparedSketch.toString("base64")}`;
   const payload = await callResponsesApi(
     {
-      model: IMAGE_ORCHESTRATOR_MODEL,
+      model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+      ...(profile === "fast"
+        ? {
+            reasoning: {
+              effort: "low"
+            }
+          }
+        : {}),
+      store: false,
       input: [
         {
           role: "user",
@@ -731,10 +827,11 @@ export async function generateImageFromSketch({
       tools: [
         {
           type: "image_generation",
+          model: profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL,
           action: "edit",
-          size: resolveImageToolSize(width, height, imageSizePreset),
-          quality: "medium",
-          input_fidelity: "high"
+          size: imageToolSize,
+          quality: profile === "fast" ? "low" : "medium",
+          input_fidelity: profile === "fast" ? "low" : "high"
         }
       ],
       tool_choice: {
@@ -751,7 +848,7 @@ export async function generateImageFromSketch({
   }
 
   return {
-    model: IMAGE_ORCHESTRATOR_MODEL,
+    model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
     buffer: Buffer.from(result, "base64")
   };
 }

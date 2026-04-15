@@ -15,6 +15,7 @@ import {
 import { buildDisplayTranscript } from "@/lib/transcript-format";
 import {
   AnalysisReasoningEffort,
+  ImageGenerationProfile,
   ImageGenerationSource,
   ImageSizePreset,
   SessionDetail
@@ -40,14 +41,17 @@ async function getRequiredSession(sessionId: string) {
 
 export async function ensureSessionAnalysis({
   sessionId,
-  reasoningEffort
+  reasoningEffort,
+  imageGenerationProfile
 }: {
   sessionId: string;
   reasoningEffort?: AnalysisReasoningEffort;
+  imageGenerationProfile?: ImageGenerationProfile;
 }) {
-  if (reasoningEffort) {
+  if (reasoningEffort || imageGenerationProfile) {
     await updateSessionPreferences(sessionId, {
-      analysisReasoningEffort: reasoningEffort
+      analysisReasoningEffort: reasoningEffort,
+      imageGenerationProfile
     });
   }
 
@@ -64,7 +68,8 @@ export async function ensureSessionAnalysis({
   const extraction = await extractSceneFromTranscript(
     transcriptText,
     getOpenAiKey(),
-    session.analysisReasoningEffort
+    session.analysisReasoningEffort,
+    session.imageGenerationProfile
   );
 
   const groundedAnalysis = groundSceneExtraction({
@@ -104,22 +109,26 @@ export async function ensureSessionGeneratedImage({
   sessionId,
   source = "labeled",
   reasoningEffort,
-  imageSizePreset
+  imageSizePreset,
+  imageGenerationProfile
 }: {
   sessionId: string;
   source?: ImageGenerationSource;
   reasoningEffort?: AnalysisReasoningEffort;
   imageSizePreset?: ImageSizePreset;
+  imageGenerationProfile?: ImageGenerationProfile;
 }) {
-  if (imageSizePreset) {
+  if (imageSizePreset || imageGenerationProfile) {
     await updateSessionPreferences(sessionId, {
-      imageSizePreset
+      imageSizePreset,
+      imageGenerationProfile
     });
   }
 
   let session = await ensureSessionAnalysis({
     sessionId,
-    reasoningEffort
+    reasoningEffort,
+    imageGenerationProfile
   });
 
   const existingTarget =
@@ -141,7 +150,8 @@ export async function ensureSessionGeneratedImage({
     width: session.canvasWidth,
     height: session.canvasHeight,
     source,
-    imageSizePreset: session.imageSizePreset
+    imageSizePreset: session.imageSizePreset,
+    profile: session.imageGenerationProfile
   });
 
   await saveSessionAsset(
@@ -157,17 +167,20 @@ export async function ensureSessionGeneratedImage({
 export async function createImageExperience({
   sessionId,
   reasoningEffort,
-  imageSizePreset
+  imageSizePreset,
+  imageGenerationProfile
 }: {
   sessionId: string;
   reasoningEffort?: AnalysisReasoningEffort;
   imageSizePreset?: ImageSizePreset;
+  imageGenerationProfile?: ImageGenerationProfile;
 }) {
   return ensureSessionGeneratedImage({
     sessionId,
     source: "labeled",
     reasoningEffort,
-    imageSizePreset
+    imageSizePreset,
+    imageGenerationProfile
   });
 }
 

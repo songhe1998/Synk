@@ -11,6 +11,9 @@ An internal demo for recording drawing events and microphone audio on the same t
 - Uses `gpt-5.4` to extract scene objects, object descriptions, evidence quotes, and global scene info from the full transcript.
 - Grounds extracted objects back to stroke clusters and renders an annotated sketch with object tags.
 - Uses the Responses API image generation tool with `gpt-5.4` orchestration to edit the labeled sketch into a final image.
+- Uses a dedicated video source planner to turn the plain sketch plus transcript into a motion-aware source-image prompt, then generates a video-specific labeled sketch and source image.
+- Uses a second OpenAI prompt-writer step to turn the transcript, video labeled sketch, and generated source image into a provider-ready video prompt before sending it to MuAPI.
+- Can turn the generated video source image into a short video through MuAPI using a low-cost lite pass for validation and a higher-cost Seedance 2 omni-reference pass for final checks.
 - Can send the generated image to the World Labs Marble API and open the result as an explorable 3D world.
 - Falls back to a placeholder transcript when no API key is configured.
 
@@ -42,6 +45,7 @@ npm run start
 6. Record a session, then open the playback page and use:
    - `Analyze with GPT-5.4`
    - `Generate image`
+   - `Generate lite video` or `Generate quality video`
    - `Preview 3D world` or `Generate HD world`
 
 ## Environment
@@ -51,13 +55,22 @@ npm run start
   Default: `whisper-1`
 - `OPENAI_SCENE_MODEL`
   Default: `gpt-5.4`
+- `OPENAI_VIDEO_SOURCE_PLAN_MODEL`
+  Default: `gpt-5.4`
 - `OPENAI_IMAGE_ORCHESTRATOR_MODEL`
   Default: `gpt-5.4`
+- `OPENAI_VIDEO_PROMPT_MODEL`
+  Default: `gpt-5.4-mini`
 - `WORLDLABS_API_KEY`
 - `WORLDLABS_MODEL_DRAFT`
   Default: `marble-1.0-draft`
 - `WORLDLABS_MODEL_HD`
   Default: `marble-1.1-plus`
+- `MUAPI_API_KEY`
+- `MUAPI_VIDEO_MODEL_LITE`
+  Default: `seedance-lite-i2v`
+- `MUAPI_VIDEO_MODEL_QUALITY`
+  Default: `seedance-2-vip-omni-reference-fast`
 - `SESSION_DATA_ROOT`
   Default: `./data/sessions`
 

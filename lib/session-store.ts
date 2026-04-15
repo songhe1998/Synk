@@ -5,12 +5,15 @@ import {
   AnalysisReasoningEffort,
   AssetKind,
   DrawingEvent,
+  ImageGenerationProfile,
   ImageSizePreset,
   SceneAnalysis,
   SessionDetail,
   SessionSummary,
+  VideoSourcePlan,
   TranscriptToken
 } from "@/lib/types";
+import { listVideoJobs } from "@/lib/video-store";
 import { listWorldJobs } from "@/lib/world-store";
 
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
@@ -18,6 +21,7 @@ const INDEX_PATH = path.join(DATA_ROOT, "index.json");
 const MAX_SESSIONS = 8;
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
+const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
 
 interface SessionMeta extends SessionSummary {}
 
@@ -46,7 +50,13 @@ function normalizeSummary(summary: SessionSummary | (Partial<SessionSummary> & {
       summary.imageSizePreset === "medium" ||
       summary.imageSizePreset === "large"
         ? summary.imageSizePreset
-        : DEFAULT_IMAGE_SIZE_PRESET
+        : DEFAULT_IMAGE_SIZE_PRESET,
+    imageGenerationProfile:
+      summary.imageGenerationProfile === "fast"
+        ? "fast"
+        : summary.imageGenerationProfile === "pro" || summary.imageGenerationProfile === "quality"
+          ? "pro"
+          : DEFAULT_IMAGE_GENERATION_PROFILE
   } satisfies SessionSummary;
 }
 
@@ -70,18 +80,26 @@ function getAnalysisPath(sessionId: string) {
   return path.join(getSessionDir(sessionId), "analysis.json");
 }
 
+function getVideoSourcePlanPath(sessionId: string) {
+  return path.join(getSessionDir(sessionId), "video-source-plan.json");
+}
+
 function getAssetPath(sessionId: string, assetKind: AssetKind) {
   switch (assetKind) {
     case "sketch":
       return path.join(getSessionDir(sessionId), "sketch.png");
     case "annotatedSketch":
       return path.join(getSessionDir(sessionId), "annotated-sketch.png");
+    case "videoAnnotatedSketch":
+      return path.join(getSessionDir(sessionId), "video-annotated-sketch.png");
     case "generatedImage":
       return path.join(getSessionDir(sessionId), "generated-image.png");
     case "generatedImageLabeled":
       return path.join(getSessionDir(sessionId), "generated-image-labeled.png");
     case "generatedImagePlain":
       return path.join(getSessionDir(sessionId), "generated-image-plain.png");
+    case "generatedVideoSourceImage":
+      return path.join(getSessionDir(sessionId), "generated-video-source-image.png");
   }
 }
 
@@ -181,8 +199,22 @@ function inferAudioExtension(mimeType: string) {
 
 async function getPreferredResultUrl(sessionId: string) {
   const worldJobs = await listWorldJobs(sessionId);
-  if (worldJobs.length > 0) {
-    return `/sessions/${sessionId}/worlds/${worldJobs[0].id}`;
+  const videoJobs = await listVideoJobs(sessionId);
+  const latestWorldJob = worldJobs[0] ?? null;
+  const latestVideoJob = videoJobs[0] ?? null;
+
+  if (latestWorldJob && latestVideoJob) {
+    return new Date(latestWorldJob.createdAt).getTime() >= new Date(latestVideoJob.createdAt).getTime()
+      ? `/sessions/${sessionId}/worlds/${latestWorldJob.id}`
+      : `/sessions/${sessionId}/videos/${latestVideoJob.id}`;
+  }
+
+  if (latestWorldJob) {
+    return `/sessions/${sessionId}/worlds/${latestWorldJob.id}`;
+  }
+
+  if (latestVideoJob) {
+    return `/sessions/${sessionId}/videos/${latestVideoJob.id}`;
   }
 
   try {
@@ -207,6 +239,7 @@ export async function createSession(
   options?: {
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
+    imageGenerationProfile?: ImageGenerationProfile;
   }
 ) {
   const id = randomUUID();
@@ -224,6 +257,7 @@ export async function createSession(
     transcriptApproximate: false,
     analysisReasoningEffort: options?.analysisReasoningEffort ?? DEFAULT_ANALYSIS_REASONING_EFFORT,
     imageSizePreset: options?.imageSizePreset ?? DEFAULT_IMAGE_SIZE_PRESET,
+    imageGenerationProfile: options?.imageGenerationProfile ?? DEFAULT_IMAGE_GENERATION_PROFILE,
     errorMessage: null
   };
 
@@ -247,6 +281,7 @@ export async function updateSessionPreferences(
   preferences: {
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
+    imageGenerationProfile?: ImageGenerationProfile;
   }
 ) {
   const summary = await readMeta(sessionId);
@@ -259,7 +294,9 @@ export async function updateSessionPreferences(
     updatedAt: new Date().toISOString(),
     analysisReasoningEffort:
       preferences.analysisReasoningEffort ?? summary.analysisReasoningEffort,
-    imageSizePreset: preferences.imageSizePreset ?? summary.imageSizePreset
+    imageSizePreset: preferences.imageSizePreset ?? summary.imageSizePreset,
+    imageGenerationProfile:
+      preferences.imageGenerationProfile ?? summary.imageGenerationProfile
   });
 
   await upsertSummary(nextSummary);
@@ -350,6 +387,24 @@ export async function saveSessionAnalysis(sessionId: string, analysis: SceneAnal
   return nextSummary;
 }
 
+export async function saveSessionVideoSourcePlan(sessionId: string, plan: VideoSourcePlan) {
+  const summary = await readMeta(sessionId);
+  if (!summary) {
+    throw new Error("Session not found");
+  }
+
+  await writeJsonAtomic(getVideoSourcePlanPath(sessionId), plan);
+
+  const nextSummary: SessionSummary = {
+    ...summary,
+    updatedAt: new Date().toISOString(),
+    errorMessage: null
+  };
+
+  await upsertSummary(nextSummary);
+  return nextSummary;
+}
+
 export async function saveSessionAsset(sessionId: string, assetKind: AssetKind, buffer: Buffer) {
   const summary = await readMeta(sessionId);
   if (!summary) {
@@ -396,14 +451,17 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
   const worldJobs = await listWorldJobs(sessionId);
+  const videoJobs = await listVideoJobs(sessionId);
 
   const sessionDir = getSessionDir(sessionId);
   const files = await readdir(sessionDir);
   const audioFile = files.find((fileName) => fileName.startsWith("audio."));
   const sketchExists = files.includes("sketch.png");
   const annotatedSketchExists = files.includes("annotated-sketch.png");
+  const videoAnnotatedSketchExists = files.includes("video-annotated-sketch.png");
   const generatedImageLabeledExists = files.includes("generated-image-labeled.png");
   const generatedImagePlainExists = files.includes("generated-image-plain.png");
+  const generatedVideoSourceImageExists = files.includes("generated-video-source-image.png");
   const generatedImageExists = files.includes("generated-image.png");
   const generatedImageUrl = generatedImageLabeledExists
     ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
@@ -420,6 +478,9 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
     annotatedSketchUrl: annotatedSketchExists
       ? `/api/sessions/${sessionId}/assets/annotatedSketch`
       : null,
+    videoAnnotatedSketchUrl: videoAnnotatedSketchExists
+      ? `/api/sessions/${sessionId}/assets/videoAnnotatedSketch`
+      : null,
     generatedImageUrl,
     generatedImageLabeledUrl: generatedImageLabeledExists
       ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
@@ -427,8 +488,12 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
     generatedImagePlainUrl: generatedImagePlainExists
       ? `/api/sessions/${sessionId}/assets/generatedImagePlain`
       : null,
+    generatedVideoSourceImageUrl: generatedVideoSourceImageExists
+      ? `/api/sessions/${sessionId}/assets/generatedVideoSourceImage`
+      : null,
     analysis,
-    worldJobs
+    worldJobs,
+    videoJobs
   };
 }
 
@@ -453,6 +518,10 @@ export async function getSessionAudio(sessionId: string) {
 
 export async function getSessionAnalysis(sessionId: string) {
   return readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
+}
+
+export async function getSessionVideoSourcePlan(sessionId: string) {
+  return readJsonFile<VideoSourcePlan | null>(getVideoSourcePlanPath(sessionId), null);
 }
 
 export async function getSessionAsset(sessionId: string, assetKind: AssetKind) {
