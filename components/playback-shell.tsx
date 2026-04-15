@@ -27,7 +27,7 @@ type AssetView =
   | "generatedVideoSource";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
-const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["lite", "quality"];
+const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 
 function getActiveTokenIndex(tokens: TranscriptToken[], currentTimeMs: number) {
@@ -127,7 +127,7 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [selectedAssetView, setSelectedAssetView] = useState<AssetView>(() => getDefaultAssetView(session));
   const [reasoningEffort, setReasoningEffort] = useState<AnalysisReasoningEffort>(session.analysisReasoningEffort);
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>(session.imageSizePreset);
-  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("lite");
+  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [analysisExpanded, setAnalysisExpanded] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);

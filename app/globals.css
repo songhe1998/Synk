@@ -1116,7 +1116,7 @@ textarea {
   position: absolute;
   top: calc(max(18px, env(safe-area-inset-top)) + 62px);
   right: max(24px, env(safe-area-inset-right));
-  bottom: calc(max(22px, env(safe-area-inset-bottom)) + 118px);
+  bottom: calc(max(22px, env(safe-area-inset-bottom)) + 104px);
   left: max(24px, env(safe-area-inset-left));
   display: grid;
   place-items: center;
@@ -1181,53 +1181,91 @@ textarea {
   text-align: center;
 }
 
-.recorder-bottom-dock {
+.recorder-bottom-controls {
   position: absolute;
   left: 50%;
-  bottom: max(20px, env(safe-area-inset-bottom));
+  bottom: max(18px, env(safe-area-inset-bottom));
   z-index: 5;
   transform: translateX(-50%);
-  display: flex;
+  width: min(calc(100% - 36px), 760px);
+}
+
+.recorder-bottom-dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  width: min(calc(100% - 36px), 1200px);
-  padding: 14px;
-  border-radius: 26px;
+  gap: 14px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 24px;
 }
 
 .recorder-target-cluster {
   display: grid;
   gap: 6px;
-  min-width: 220px;
+  min-width: 0;
 }
 
-.recorder-chip {
-  display: grid;
-  gap: 4px;
-  min-width: 96px;
-  padding: 10px 14px;
-  border-radius: 18px;
+.recorder-destination-control {
+  width: 100%;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.recorder-destination-control button {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 14px;
+  font-size: 0.96rem;
+  background: transparent;
+  color: rgba(243, 233, 214, 0.76);
+  border: 1px solid transparent;
+  box-shadow: none;
+}
+
+.recorder-experience-page .recorder-destination-control button:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+.recorder-experience-page .recorder-destination-control button.active {
+  background: rgba(255, 255, 255, 0.09);
   color: #f6f0e4;
-}
-
-.recorder-chip span {
-  color: rgba(243, 233, 214, 0.72);
-  font-size: 0.74rem;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.recorder-chip strong {
-  font-size: 1rem;
+  border-color: rgba(240, 90, 40, 0.42);
+  box-shadow: inset 0 0 0 1px rgba(240, 90, 40, 0.12);
 }
 
 .recorder-primary-button {
-  min-width: 240px;
+  min-width: 200px;
   padding-inline: 22px;
-  box-shadow: 0 20px 48px rgba(240, 90, 40, 0.24);
+  min-height: 52px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.recorder-cta-button {
+  justify-self: end;
+  width: auto;
+  min-width: 244px;
+  border-radius: 18px;
+  background: linear-gradient(135deg, #4bb9c9 0%, #2d8f9f 100%);
+  color: #041016;
+  box-shadow:
+    0 18px 42px rgba(28, 128, 146, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.12);
+}
+
+.recorder-cta-button:hover {
+  background: linear-gradient(135deg, #57c4d3 0%, #3399a8 100%);
+}
+
+.recorder-cta-button.stop-button {
+  background: linear-gradient(135deg, #ff6d5f 0%, #d84a42 100%);
+  color: #fff7f4;
+  box-shadow:
+    0 18px 42px rgba(176, 48, 40, 0.26),
+    0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .recorder-drawer-scrim {
@@ -1959,7 +1997,7 @@ textarea {
   .recorder-board-stage {
     top: calc(max(18px, env(safe-area-inset-top)) + 108px);
     right: 16px;
-    bottom: calc(max(20px, env(safe-area-inset-bottom)) + 146px);
+    bottom: calc(max(20px, env(safe-area-inset-bottom)) + 118px);
     left: 16px;
   }
 
@@ -1969,24 +2007,39 @@ textarea {
 
   .recorder-floating-alert {
     top: auto;
-    bottom: calc(max(20px, env(safe-area-inset-bottom)) + 262px);
+    bottom: calc(max(20px, env(safe-area-inset-bottom)) + 198px);
     left: 16px;
     right: 16px;
     transform: none;
     max-width: none;
   }
 
-  .recorder-bottom-dock {
+  .recorder-bottom-controls {
     left: 16px;
     right: 16px;
     width: auto;
     transform: none;
-    justify-content: stretch;
+  }
+
+  .recorder-bottom-dock {
+    grid-template-columns: 1fr;
+    gap: 12px;
+    padding: 12px;
   }
 
   .recorder-target-cluster,
   .recorder-primary-button {
     width: 100%;
+  }
+
+  .recorder-destination-control button {
+    min-height: 42px;
+  }
+
+  .recorder-cta-button {
+    width: 100%;
+    min-height: 54px;
+    justify-self: stretch;
   }
 
   .page-shell {

@@ -21,12 +21,25 @@ const DEFAULT_PEN_COLOR = "#20222b";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
-const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["lite", "quality"];
+const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 type OutputTarget = "image" | "world" | "video";
 type RecorderPhase = "idle" | "recording" | "uploading" | "processing" | "creating" | "error";
 
+function outputTargetResult(target: OutputTarget) {
+  switch (target) {
+    case "image":
+      return "image";
+    case "video":
+      return "video";
+    case "world":
+      return "3D world";
+  }
+}
+
 function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMessage: string | null) {
+  const result = outputTargetResult(outputTarget);
+
   switch (phase) {
     case "idle":
       return {
@@ -39,42 +52,34 @@ function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMes
               : "Sketch to image",
         detail:
           outputTarget === "world"
-            ? "Choose the destination, hit start, and let the image step stay hidden behind the world build."
+            ? "Choose the destination, hit start, and stop when the sketch feels ready."
             : outputTarget === "video"
-              ? "Choose the destination, hit start, and let the image step stay hidden behind the video build."
-            : "Choose the destination, hit start, and stop once the scene is ready for the final image."
+              ? "Choose the destination, hit start, and stop when the sketch feels ready."
+            : "Choose the destination, hit start, and stop when the sketch feels ready."
       };
     case "recording":
       return {
         label: "Recording",
-        title: "Live capture in progress",
-        detail: "Every stroke and spoken word is landing on the same timeline. Draw naturally, then stop when the scene is complete."
+        title: "Sketch and speak freely",
+        detail: "When it feels right, stop and let Synk make the final result."
       };
     case "uploading":
       return {
-        label: "Uploading",
-        title: "Sending the session",
-        detail: "Audio, sketch, and drawing events are being uploaded to the server."
+        label: "Preparing",
+        title: `Getting your ${result} ready`,
+        detail: "Give it a moment."
       };
     case "processing":
       return {
-        label: "Transcribing",
-        title: "Understanding the narration",
-        detail: "The recording is being transcribed so the sketch can be grounded against what was said."
+        label: "Creating",
+        title: `Making your ${result}`,
+        detail: "This can take a little longer on bigger ideas."
       };
     case "creating":
       return {
-        label: outputTarget === "world" ? "World build" : outputTarget === "video" ? "Video build" : "Image build",
-        title:
-          outputTarget === "world" || outputTarget === "video"
-            ? "Building the hidden image step"
-            : "Generating the final image",
-        detail:
-          outputTarget === "world"
-            ? "The grounded image is being generated and handed off to World Labs so the world job can start."
-            : outputTarget === "video"
-              ? "The grounded image is being generated and handed off to MuAPI so the video job can start."
-            : "The grounded sketch is being turned into the final rendered image."
+        label: "Finishing",
+        title: outputTarget === "world" ? "Bringing your 3D world to life" : `Finishing your ${result}`,
+        detail: outputTarget === "world" ? "This one can take a bit longer." : "Almost there."
       };
     case "error":
       return {
@@ -113,6 +118,17 @@ function makeTitle() {
   return `Live Demo ${new Date().toLocaleString()}`;
 }
 
+function outputTargetSummary(target: OutputTarget) {
+  switch (target) {
+    case "image":
+      return "This take will render a final image.";
+    case "world":
+      return "This take will render an image, then build a 3D world.";
+    case "video":
+      return "This take will render an image, then build a video.";
+  }
+}
+
 export function RecorderShell({ initialSessions }: { initialSessions: SessionSummary[] }) {
   const router = useRouter();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -129,12 +145,9 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
   const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("pro");
-  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("lite");
+  const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
-  const [outputTarget, setOutputTarget] = useState<OutputTarget>("world");
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [liveStrokeCount, setLiveStrokeCount] = useState(0);
-  const [canRedo, setCanRedo] = useState(false);
+  const [outputTarget, setOutputTarget] = useState<OutputTarget>("image");
   const [sessions, setSessions] = useState(initialSessions);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [activeDrawer, setActiveDrawer] = useState<"recent" | "settings" | null>(null);
@@ -156,21 +169,6 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
   }, []);
 
-  useEffect(() => {
-    if (phase !== "recording") {
-      return;
-    }
-
-    const handle = window.setInterval(() => {
-      if (!startedAtRef.current) {
-        return;
-      }
-      setElapsedMs(Math.round(performance.now() - startedAtRef.current));
-    }, 120);
-
-    return () => window.clearInterval(handle);
-  }, [phase]);
-
   function redrawCanvas() {
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -181,8 +179,6 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
       return;
     }
     drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
-    setLiveStrokeCount(drawingStateRef.current.strokes.length);
-    setCanRedo(drawingStateRef.current.undoneStrokes.length > 0);
   }
 
   function getEventTime() {
@@ -365,9 +361,6 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
       eventsRef.current = [];
       activeStrokeIdRef.current = null;
       startedAtRef.current = performance.now();
-      setElapsedMs(0);
-      setLiveStrokeCount(0);
-      setCanRedo(false);
       redrawCanvas();
 
       recorder.start();
@@ -451,39 +444,6 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     activeStrokeIdRef.current = null;
   }
 
-  function handleUndo() {
-    if (phase !== "recording" || drawingStateRef.current.strokes.length === 0) {
-      return;
-    }
-
-    pushEvent({
-      type: "undo",
-      tMs: getEventTime()
-    });
-  }
-
-  function handleRedo() {
-    if (phase !== "recording" || drawingStateRef.current.undoneStrokes.length === 0) {
-      return;
-    }
-
-    pushEvent({
-      type: "redo",
-      tMs: getEventTime()
-    });
-  }
-
-  function handleClear() {
-    if (phase !== "recording") {
-      return;
-    }
-
-    pushEvent({
-      type: "clear",
-      tMs: getEventTime()
-    });
-  }
-
   const isBusy = phase === "uploading" || phase === "processing" || phase === "creating";
   const phaseCopy = getPhaseCopy(phase, outputTarget, errorMessage);
   const isRecording = phase === "recording";
@@ -498,7 +458,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
         <header className="recorder-experience-header">
           <div className="recorder-brandline">
             <div className="recorder-brand-mark">Synk</div>
-            <p className="recorder-brand-copy-inline">Sketch and speak into an image or a 3D world.</p>
+            <p className="recorder-brand-copy-inline">Sketch and speak into an image, video, or even a 3D world.</p>
           </div>
 
           <div className="recorder-header-actions">
@@ -546,81 +506,60 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
 
         {errorMessage ? <div className="recorder-floating-alert">{errorMessage}</div> : null}
 
-        <div className="recorder-bottom-dock">
-          <div className="recorder-target-cluster">
-            <span className="recorder-dock-label">Destination</span>
-            <div className="segmented-control">
+        <div className="recorder-bottom-controls">
+          <div className="recorder-bottom-dock">
+            <div className="recorder-target-cluster">
+              <span className="recorder-dock-label">Destination</span>
+              <div className="segmented-control recorder-destination-control">
+                <button
+                  type="button"
+                  className={outputTarget === "image" ? "active" : ""}
+                  onClick={() => setOutputTarget("image")}
+                  disabled={isRecording || isBusy}
+                >
+                  Image
+                </button>
+                <button
+                  type="button"
+                  className={outputTarget === "world" ? "active" : ""}
+                  onClick={() => setOutputTarget("world")}
+                  disabled={isRecording || isBusy}
+                >
+                  3D world
+                </button>
+                <button
+                  type="button"
+                  className={outputTarget === "video" ? "active" : ""}
+                  onClick={() => setOutputTarget("video")}
+                  disabled={isRecording || isBusy}
+                >
+                  Video
+                </button>
+              </div>
+            </div>
+
+            {phase === "idle" || phase === "error" ? (
               <button
                 type="button"
-                className={outputTarget === "image" ? "active" : ""}
-                onClick={() => setOutputTarget("image")}
-                disabled={isRecording || isBusy}
+                className="primary-button recorder-primary-button recorder-cta-button"
+                onClick={startRecording}
               >
-                Image
+                Start sketching
               </button>
+            ) : (
               <button
                 type="button"
-                className={outputTarget === "world" ? "active" : ""}
-                onClick={() => setOutputTarget("world")}
-                disabled={isRecording || isBusy}
+                className="primary-button stop-button recorder-primary-button recorder-cta-button"
+                onClick={stopRecording}
+                disabled={isBusy}
               >
-                3D world
+                {outputTarget === "world"
+                  ? "Finish and build 3D world"
+                  : outputTarget === "video"
+                    ? "Finish and build video"
+                    : "Finish and generate image"}
               </button>
-              <button
-                type="button"
-                className={outputTarget === "video" ? "active" : ""}
-                onClick={() => setOutputTarget("video")}
-                disabled={isRecording || isBusy}
-              >
-                Video
-              </button>
-            </div>
-          </div>
-
-          <div className="recorder-live-meta">
-            <div className="recorder-chip">
-              <span>Timer</span>
-              <strong>{formatDuration(elapsedMs)}</strong>
-            </div>
-            <div className="recorder-chip">
-              <span>Strokes</span>
-              <strong>{liveStrokeCount}</strong>
-            </div>
-          </div>
-
-          {phase === "idle" || phase === "error" ? (
-            <button type="button" className="primary-button recorder-primary-button" onClick={startRecording}>
-              {outputTarget === "world"
-                ? "Start sketch to 3D world"
-                : outputTarget === "video"
-                  ? "Start sketch to video"
-                  : "Start sketch to image"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="primary-button stop-button recorder-primary-button"
-              onClick={stopRecording}
-              disabled={isBusy}
-            >
-              {outputTarget === "world"
-                ? "Stop and build 3D world"
-                : outputTarget === "video"
-                  ? "Stop and build video"
-                  : "Stop and generate image"}
-            </button>
-          )}
-
-          <div className="recorder-history-actions">
-            <button type="button" className="recorder-dock-button" onClick={handleUndo} disabled={!isRecording}>
-              Undo
-            </button>
-            <button type="button" className="recorder-dock-button" onClick={handleRedo} disabled={!isRecording || !canRedo}>
-              Redo
-            </button>
-            <button type="button" className="recorder-dock-button" onClick={handleClear} disabled={!isRecording}>
-              Clear
-            </button>
+            )}
           </div>
         </div>
 
@@ -684,6 +623,37 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
               </div>
 
               <div className="recorder-drawer-body recorder-settings-body">
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Destination</span>
+                  <div className="segmented-control">
+                    <button
+                      type="button"
+                      className={outputTarget === "image" ? "active" : ""}
+                      onClick={() => setOutputTarget("image")}
+                      disabled={isRecording || isBusy}
+                    >
+                      Image
+                    </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "world" ? "active" : ""}
+                      onClick={() => setOutputTarget("world")}
+                      disabled={isRecording || isBusy}
+                    >
+                      3D world
+                    </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "video" ? "active" : ""}
+                      onClick={() => setOutputTarget("video")}
+                      disabled={isRecording || isBusy}
+                    >
+                      Video
+                    </button>
+                  </div>
+                  <p className="recorder-settings-copy">{outputTargetSummary(outputTarget)}</p>
+                </section>
+
                 <section className="recorder-settings-section">
                   <span className="recorder-tool-label">Video pipeline</span>
                   <div className="segmented-control">

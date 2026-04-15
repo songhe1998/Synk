@@ -33,7 +33,7 @@ function parseTarget(value: unknown) {
 }
 
 function parseVideoModelPreset(value: unknown): VideoModelPreset {
-  return value === "quality" ? "quality" : "lite";
+  return value === "lite" ? "lite" : "quality";
 }
 
 function parseVideoPipelineMode(value: unknown): VideoPipelineMode {

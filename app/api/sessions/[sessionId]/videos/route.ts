@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 function parseModelPreset(value: unknown): VideoModelPreset {
-  return value === "quality" ? "quality" : "lite";
+  return value === "lite" ? "lite" : "quality";
 }
 
 function parsePipelineMode(value: unknown): VideoPipelineMode {
