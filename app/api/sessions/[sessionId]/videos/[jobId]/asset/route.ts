@@ -1,3 +1,5 @@
+import { requireApiViewer } from "@/lib/auth-route";
+import { getSessionDetail } from "@/lib/session-store";
 import { getVideoJobAsset } from "@/lib/video-store";
 
 export async function GET(
@@ -5,6 +7,15 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string; jobId: string }> }
 ) {
   const { sessionId, jobId } = await params;
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}/videos/${jobId}`);
+  if (response) {
+    return response;
+  }
+
+  if (!(await getSessionDetail(sessionId, viewer?.id))) {
+    return new Response("Session not found", { status: 404 });
+  }
+
   const asset = await getVideoJobAsset(sessionId, jobId);
   if (!asset) {
     return new Response("Video not found", { status: 404 });

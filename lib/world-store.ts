@@ -2,6 +2,13 @@ import { randomUUID } from "crypto";
 import { mkdir, readFile, rename, writeFile } from "fs/promises";
 import path from "path";
 import { WorldJob } from "@/lib/types";
+import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
+import {
+  createSupabaseWorldJob,
+  getSupabaseWorldJob,
+  listSupabaseWorldJobs,
+  updateSupabaseWorldJob
+} from "@/lib/supabase-world-store";
 
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 
@@ -42,6 +49,15 @@ async function readWorldJobs(sessionId: string) {
   }
 }
 
+export async function listLocalWorldJobs(sessionId: string) {
+  return readWorldJobs(sessionId);
+}
+
+export async function getLocalWorldJob(sessionId: string, jobId: string) {
+  const jobs = await readWorldJobs(sessionId);
+  return jobs.find((job) => job.id === jobId) ?? null;
+}
+
 async function writeWorldJobs(sessionId: string, jobs: WorldJob[]) {
   await mkdir(getSessionDir(sessionId), { recursive: true });
   const ordered = jobs
@@ -51,10 +67,18 @@ async function writeWorldJobs(sessionId: string, jobs: WorldJob[]) {
 }
 
 export async function listWorldJobs(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return listSupabaseWorldJobs(sessionId);
+  }
+
   return readWorldJobs(sessionId);
 }
 
 export async function getWorldJob(sessionId: string, jobId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseWorldJob(sessionId, jobId);
+  }
+
   const jobs = await readWorldJobs(sessionId);
   return jobs.find((job) => job.id === jobId) ?? null;
 }
@@ -63,6 +87,10 @@ export async function createWorldJob(
   sessionId: string,
   job: Omit<WorldJob, "id" | "sessionId" | "createdAt" | "updatedAt" | "sourceImageUrl">
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return createSupabaseWorldJob(sessionId, job);
+  }
+
   const now = new Date().toISOString();
   const nextJob = normalizeWorldJob(sessionId, {
     ...job,
@@ -83,6 +111,10 @@ export async function updateWorldJob(
   jobId: string,
   updater: (job: WorldJob) => WorldJob
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return updateSupabaseWorldJob(sessionId, jobId, updater);
+  }
+
   const jobs = await readWorldJobs(sessionId);
   const current = jobs.find((job) => job.id === jobId);
 

@@ -3,8 +3,18 @@
 import type { Route } from "next";
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { DEMO_CANVAS, applyDrawingEvent, createEmptyDrawingState, drawDrawingState, formatDuration } from "@/lib/drawing";
+import { DEMO_CANVAS, applyDrawingEvent, createEmptyDrawingState, drawDrawingState } from "@/lib/drawing";
+import {
+  buildGalleryItemFromSession,
+  buildPendingGalleryItem,
+  buildPlaceholderGalleryItem,
+  mergeVideoJobIntoSession,
+  mergeWebsiteJobIntoSession,
+  mergeWorldJobIntoSession,
+  RecorderGalleryItem,
+  RecorderGalleryTarget
+} from "@/lib/recorder-gallery";
+import { useSupabaseAuthCompletion } from "@/lib/use-supabase-auth-completion";
 import {
   AnalysisReasoningEffort,
   DrawingEvent,
@@ -12,113 +22,93 @@ import {
   DrawingTool,
   ImageGenerationProfile,
   ImageSizePreset,
+  SessionDetail,
   SessionSummary,
+  VideoJob,
   VideoModelPreset,
-  VideoPipelineMode
+  VideoPipelineMode,
+  WebsiteJob,
+  WorldJob
 } from "@/lib/types";
+import { concatPcmChunks, encodeMonoPcmWav } from "@/lib/wav";
+import type { Viewer } from "@/lib/auth";
 
 const DEFAULT_PEN_COLOR = "#20222b";
+const PCM_BUFFER_SIZE = 1024;
+const SKETCH_FLIGHT_REPLACE_DELAY_MS = 560;
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
 const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
-type OutputTarget = "image" | "world" | "video";
-type RecorderPhase = "idle" | "recording" | "uploading" | "processing" | "creating" | "error";
 
-function outputTargetResult(target: OutputTarget) {
-  switch (target) {
-    case "image":
-      return "image";
-    case "video":
-      return "video";
-    case "world":
-      return "3D world";
-  }
+type OutputTarget = RecorderGalleryTarget;
+type RecorderPhase = "idle" | "arming" | "listening" | "paused" | "handoff" | "error";
+
+interface CompletedCapture {
+  tempId: string;
+  title: string;
+  createdAt: string;
+  events: DrawingEvent[];
+  sketchBlob: Blob | null;
+  sketchDataUrl: string | null;
+  audioBlob: Blob;
+  audioMimeType: string;
+  durationMs: number;
 }
 
-function getPhaseCopy(phase: RecorderPhase, outputTarget: OutputTarget, errorMessage: string | null) {
-  const result = outputTargetResult(outputTarget);
-
-  switch (phase) {
-    case "idle":
-      return {
-        label: "Ready",
-        title:
-          outputTarget === "world"
-            ? "Sketch to 3D world"
-            : outputTarget === "video"
-              ? "Sketch to video"
-              : "Sketch to image",
-        detail:
-          outputTarget === "world"
-            ? "Choose the destination, hit start, and stop when the sketch feels ready."
-            : outputTarget === "video"
-              ? "Choose the destination, hit start, and stop when the sketch feels ready."
-            : "Choose the destination, hit start, and stop when the sketch feels ready."
-      };
-    case "recording":
-      return {
-        label: "Recording",
-        title: "Sketch and speak freely",
-        detail: "When it feels right, stop and let Synk make the final result."
-      };
-    case "uploading":
-      return {
-        label: "Preparing",
-        title: `Getting your ${result} ready`,
-        detail: "Give it a moment."
-      };
-    case "processing":
-      return {
-        label: "Creating",
-        title: `Making your ${result}`,
-        detail: "This can take a little longer on bigger ideas."
-      };
-    case "creating":
-      return {
-        label: "Finishing",
-        title: outputTarget === "world" ? "Bringing your 3D world to life" : `Finishing your ${result}`,
-        detail: outputTarget === "world" ? "This one can take a bit longer." : "Almost there."
-      };
-    case "error":
-      return {
-        label: "Error",
-        title: "The session stopped early",
-        detail: errorMessage || "Something went wrong while finishing the capture."
-      };
-  }
+interface ActiveTake {
+  id: string;
+  title: string;
+  createdAt: string;
+  startedAt: number;
+  audioPcmChunks: Float32Array[];
+  pausedAt: number | null;
 }
 
-function statusLabel(status: SessionSummary["status"]) {
-  switch (status) {
-    case "created":
-      return "Draft";
-    case "uploaded":
-      return "Uploaded";
-    case "processing":
-      return "Processing";
-    case "ready":
-      return "Ready";
-    case "failed":
-      return "Failed";
-  }
+interface VoiceMonitor {
+  stream: MediaStream;
+  audioContext: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  silenceGain: GainNode;
+  sampleRate: number;
 }
 
-function relativeDate(isoString: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit"
-  }).format(new Date(isoString));
+interface FinalizeOptionsSnapshot {
+  target: OutputTarget;
+  reasoningEffort: AnalysisReasoningEffort;
+  imageSizePreset: ImageSizePreset;
+  imageGenerationProfile: ImageGenerationProfile;
+  videoModelPreset: VideoModelPreset;
+  videoPipelineMode: VideoPipelineMode;
 }
+
+interface FlightRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
+interface SketchFlight {
+  itemId: string;
+  imageUrl: string;
+  from: FlightRect;
+  to: FlightRect | null;
+  phase: "measuring" | "ready" | "animating";
+}
+
+type BrowserWindowWithWebkitAudioContext = Window &
+  typeof globalThis & {
+    webkitAudioContext?: typeof AudioContext;
+  };
 
 function makeTitle() {
   return `Live Demo ${new Date().toLocaleString()}`;
 }
 
-function outputTargetSummary(target: OutputTarget) {
+function outputTargetSummary(target: OutputTarget, websiteEnabled: boolean) {
   switch (target) {
     case "image":
       return "This take will render a final image.";
@@ -126,20 +116,88 @@ function outputTargetSummary(target: OutputTarget) {
       return "This take will render an image, then build a 3D world.";
     case "video":
       return "This take will render an image, then build a video.";
+    case "website":
+      return websiteEnabled
+        ? "This take will build a website directly from the labeled sketch and transcript."
+        : "Website generation is disabled until Vercel Sandbox credentials are configured.";
   }
 }
 
-export function RecorderShell({ initialSessions }: { initialSessions: SessionSummary[] }) {
-  const router = useRouter();
+function sortGalleryItems(items: RecorderGalleryItem[]) {
+  return [...items].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+}
+
+function cloneDrawingEvents(events: DrawingEvent[]) {
+  return events.map((event) => ({ ...event })) as DrawingEvent[];
+}
+
+function clonePcmChunks(chunks: Float32Array[]) {
+  return chunks.map((chunk) => new Float32Array(chunk));
+}
+
+function canReuseStream(stream: MediaStream | null | undefined) {
+  return Boolean(stream?.getAudioTracks().some((track) => track.readyState === "live"));
+}
+
+function readRouteError(payload: unknown, fallback: string) {
+  if (payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string") {
+    return payload.error;
+  }
+
+  return fallback;
+}
+
+function getGalleryCardClass(item: RecorderGalleryItem) {
+  return `recorder-gallery-card recorder-gallery-card-${item.status}`;
+}
+
+function getFlightTargetRect(element: HTMLElement) {
+  const thumbnail = element.querySelector<HTMLElement>(".recorder-gallery-card-thumb");
+  const rect = (thumbnail ?? element).getBoundingClientRect();
+  return {
+    top: rect.top,
+    left: rect.left,
+    width: rect.width,
+    height: rect.height
+  };
+}
+
+export function RecorderShell({
+  initialSessions,
+  viewer,
+  authEnabled,
+  signInHref,
+  setupMessage,
+  websiteEnabled
+}: {
+  initialSessions: SessionSummary[];
+  viewer: Viewer | null;
+  authEnabled: boolean;
+  signInHref: string;
+  setupMessage?: string | null;
+  websiteEnabled: boolean;
+}) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const canvasFrameRef = useRef<HTMLDivElement | null>(null);
   const drawingStateRef = useRef<DrawingState>(createEmptyDrawingState());
   const eventsRef = useRef<DrawingEvent[]>([]);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
   const activeStrokeIdRef = useRef<string | null>(null);
-  const sessionIdRef = useRef<string | null>(null);
-  const startedAtRef = useRef<number | null>(null);
+  const takeRef = useRef<ActiveTake | null>(null);
+  const voiceMonitorRef = useRef<VoiceMonitor | null>(null);
+  const armingVoiceRef = useRef(false);
+  const galleryItemsRef = useRef<RecorderGalleryItem[]>([]);
+  const galleryCardRefs = useRef(new Map<string, HTMLElement>());
+  const sessionDetailsRef = useRef(new Map<string, SessionDetail>());
+  const pollingSessionsRef = useRef(new Set<string>());
+  const submissionQueueRef = useRef(Promise.resolve());
+  const lifecycleTransitionQueueRef = useRef(Promise.resolve());
+  const windowFocusedRef = useRef(true);
+  const createSessionConfigRef = useRef({
+    analysisReasoningEffort: "medium" as AnalysisReasoningEffort,
+    imageSizePreset: "medium" as ImageSizePreset,
+    imageGenerationProfile: "pro" as ImageGenerationProfile
+  });
+  const canListenRef = useRef(!(authEnabled && !viewer));
 
   const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
@@ -148,12 +206,47 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [outputTarget, setOutputTarget] = useState<OutputTarget>("image");
-  const [sessions, setSessions] = useState(initialSessions);
+  const [galleryItems, setGalleryItems] = useState<RecorderGalleryItem[]>(() =>
+    sortGalleryItems(initialSessions.map((session) => buildPlaceholderGalleryItem(session)))
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [activeDrawer, setActiveDrawer] = useState<"recent" | "settings" | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [authPromptVisible, setAuthPromptVisible] = useState(false);
+  const [activeDrawer, setActiveDrawer] = useState<"settings" | null>(null);
+  const [flight, setFlight] = useState<SketchFlight | null>(null);
+  const [hasSketchContent, setHasSketchContent] = useState(false);
   const tool: DrawingTool = "pen";
   const color = DEFAULT_PEN_COLOR;
   const brushWidth = 6;
+
+  useEffect(() => {
+    galleryItemsRef.current = galleryItems;
+  }, [galleryItems]);
+
+  useEffect(() => {
+    createSessionConfigRef.current = {
+      analysisReasoningEffort,
+      imageSizePreset,
+      imageGenerationProfile
+    };
+  }, [analysisReasoningEffort, imageGenerationProfile, imageSizePreset]);
+
+  useEffect(() => {
+    canListenRef.current = !(authEnabled && !viewer);
+  }, [authEnabled, viewer]);
+
+  useEffect(() => {
+    if (viewer) {
+      setAuthPromptVisible(false);
+      setAuthNotice(null);
+    }
+  }, [viewer]);
+
+  useEffect(() => {
+    if (!websiteEnabled && outputTarget === "website") {
+      setOutputTarget("image");
+    }
+  }, [outputTarget, websiteEnabled]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -169,23 +262,82 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
   }, []);
 
+  useSupabaseAuthCompletion({
+    authEnabled,
+    redirectTarget: "/dashboard",
+    enabled: !viewer,
+    onStart: () => {
+      setAuthPromptVisible(false);
+      setAuthNotice("Finishing sign-in...");
+      setErrorMessage(null);
+    },
+    onError: (message) => {
+      setAuthPromptVisible(false);
+      setAuthNotice(null);
+      setErrorMessage(message);
+    }
+  });
+
   function redrawCanvas() {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
     }
+
     const context = canvas.getContext("2d");
     if (!context) {
       return;
     }
+
     drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
   }
 
-  function getEventTime() {
-    if (!startedAtRef.current) {
-      return 0;
+  function resetBoard() {
+    drawingStateRef.current = createEmptyDrawingState();
+    eventsRef.current = [];
+    activeStrokeIdRef.current = null;
+    setHasSketchContent(false);
+    redrawCanvas();
+  }
+
+  function createActiveTake(startedAt = performance.now()): ActiveTake {
+    return {
+      id: crypto.randomUUID(),
+      title: makeTitle(),
+      createdAt: new Date().toISOString(),
+      startedAt,
+      audioPcmChunks: [],
+      pausedAt: null
+    };
+  }
+
+  function resetActiveTake(startedAt = performance.now()) {
+    takeRef.current = createActiveTake(startedAt);
+  }
+
+  function pauseActiveTake(now = performance.now()) {
+    const activeTake = takeRef.current;
+    if (!activeTake || activeTake.pausedAt !== null) {
+      return;
     }
-    return Math.max(0, Math.round(performance.now() - startedAtRef.current));
+
+    activeTake.pausedAt = now;
+  }
+
+  function resumeActiveTake(now = performance.now()) {
+    const activeTake = takeRef.current;
+    if (!activeTake || activeTake.pausedAt === null) {
+      return;
+    }
+
+    activeTake.startedAt += now - activeTake.pausedAt;
+    activeTake.pausedAt = null;
+  }
+
+  function enqueueLifecycleTransition(task: () => Promise<void>) {
+    const queued = lifecycleTransitionQueueRef.current.catch(() => undefined).then(task);
+    lifecycleTransitionQueueRef.current = queued.catch(() => undefined);
+    return queued;
   }
 
   function getCanvasPoint(event: React.PointerEvent<HTMLCanvasElement>) {
@@ -199,197 +351,810 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     };
   }
 
+  function getEventTime() {
+    const take = takeRef.current;
+    if (!take) {
+      return 0;
+    }
+
+    return Math.max(0, Math.round(performance.now() - take.startedAt));
+  }
+
   function pushEvent(event: DrawingEvent) {
     eventsRef.current.push(event);
     applyDrawingEvent(drawingStateRef.current, event);
+    setHasSketchContent(drawingStateRef.current.strokes.length > 0);
     redrawCanvas();
   }
 
-  async function refreshRecentSessions() {
-    const response = await fetch("/api/sessions/recent", { cache: "no-store" });
-    if (!response.ok) {
-      return;
-    }
-    const payload = (await response.json()) as SessionSummary[];
-    setSessions(payload);
+  function getFinalizeOptionsSnapshot(): FinalizeOptionsSnapshot {
+    return {
+      target: outputTarget,
+      reasoningEffort: analysisReasoningEffort,
+      imageSizePreset,
+      imageGenerationProfile,
+      videoModelPreset,
+      videoPipelineMode
+    };
   }
 
-  async function startRecording() {
+  function setGalleryCardRef(sessionId: string, node: HTMLElement | null) {
+    if (node) {
+      galleryCardRefs.current.set(sessionId, node);
+      return;
+    }
+
+    galleryCardRefs.current.delete(sessionId);
+  }
+
+  function upsertGalleryItem(nextItem: RecorderGalleryItem) {
+    setGalleryItems((current) => sortGalleryItems([nextItem, ...current.filter((item) => item.sessionId !== nextItem.sessionId)]));
+  }
+
+  function replaceGalleryItem(currentSessionId: string, nextItem: RecorderGalleryItem) {
+    setGalleryItems((current) =>
+      sortGalleryItems(
+        [nextItem, ...current.filter((item) => item.sessionId !== currentSessionId && item.sessionId !== nextItem.sessionId)]
+      )
+    );
+  }
+
+  function patchGalleryItem(sessionId: string, updater: (item: RecorderGalleryItem) => RecorderGalleryItem) {
+    setGalleryItems((current) =>
+      sortGalleryItems(
+        current.map((item) => {
+          if (item.sessionId !== sessionId) {
+            return item;
+          }
+
+          return updater(item);
+        })
+      )
+    );
+  }
+
+  function preserveQueuedSketchPreview(currentItem: RecorderGalleryItem, nextItem: RecorderGalleryItem) {
+    const shouldKeepLocalSketch =
+      currentItem.status === "pending" &&
+      currentItem.previewKind === "sketch" &&
+      Boolean(currentItem.sketchThumbnailUrl) &&
+      !nextItem.sketchThumbnailUrl &&
+      !nextItem.sourceImageUrl;
+
+    if (!shouldKeepLocalSketch) {
+      return nextItem;
+    }
+
+    return {
+      ...nextItem,
+      thumbnailUrl: currentItem.sketchThumbnailUrl,
+      sketchThumbnailUrl: currentItem.sketchThumbnailUrl,
+      previewKind: "sketch" as const
+    };
+  }
+
+  function launchSketchFlight(itemId: string, imageUrl: string | null) {
+    const frame = canvasFrameRef.current;
+    if (!frame || !imageUrl) {
+      return;
+    }
+
+    const rect = frame.getBoundingClientRect();
+    setFlight({
+      itemId,
+      imageUrl,
+      from: {
+        top: rect.top + rect.height * 0.12,
+        left: rect.left + rect.width * 0.12,
+        width: rect.width * 0.76,
+        height: rect.height * 0.76
+      },
+      to: null,
+      phase: "measuring"
+    });
+  }
+
+  useEffect(() => {
+    if (!flight || flight.phase !== "measuring") {
+      return;
+    }
+
+    const target = galleryCardRefs.current.get(flight.itemId);
+    if (!target) {
+      return;
+    }
+
+    setFlight((current) =>
+      current && current.phase === "measuring"
+        ? {
+            ...current,
+            to: getFlightTargetRect(target),
+            phase: "ready"
+          }
+        : current
+    );
+  }, [flight, galleryItems]);
+
+  useEffect(() => {
+    if (!flight || flight.phase !== "ready" || !flight.to) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      setFlight((current) =>
+        current && current.phase === "ready"
+          ? {
+              ...current,
+              phase: "animating"
+            }
+          : current
+      );
+    });
+    const timer = window.setTimeout(() => {
+      setFlight(null);
+    }, 520);
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [flight]);
+
+  async function getCanvasSnapshotBlob() {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return null;
+    }
+
+    return new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((blob) => resolve(blob), "image/png");
+    });
+  }
+
+  function getCanvasSnapshotDataUrl() {
+    return canvasRef.current?.toDataURL("image/png") ?? null;
+  }
+
+  async function fetchSessionDetail(sessionId: string) {
+    const response = await fetch(`/api/sessions/${sessionId}`, { cache: "no-store" });
+    if (response.status === 404) {
+      return null;
+    }
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(readRouteError(payload, "Failed to load the session."));
+    }
+
+    return payload as SessionDetail;
+  }
+
+  async function createSessionOnServer(title: string) {
+    const config = createSessionConfigRef.current;
+    const response = await fetch("/api/sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        title,
+        analysisReasoningEffort: config.analysisReasoningEffort,
+        imageSizePreset: config.imageSizePreset,
+        imageGenerationProfile: config.imageGenerationProfile
+      })
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(readRouteError(payload, "Failed to create a session."));
+    }
+
+    return payload as SessionSummary;
+  }
+
+  async function getOrCreateAudioStream(existingStream?: MediaStream | null) {
+    if (canReuseStream(existingStream)) {
+      return existingStream!;
+    }
+
+    return navigator.mediaDevices.getUserMedia({
+      audio: true
+    });
+  }
+
+  async function stopVoiceMonitoring(options?: { stopTracks?: boolean; keepalive?: boolean }) {
+    const monitor = voiceMonitorRef.current;
+    armingVoiceRef.current = false;
+    if (!monitor) {
+      return;
+    }
+
+    voiceMonitorRef.current = null;
+
+    monitor.source.disconnect();
+    monitor.processor.disconnect();
+    monitor.silenceGain.disconnect();
+
+    if (options?.stopTracks ?? true) {
+      monitor.stream.getTracks().forEach((track) => track.stop());
+    }
+
+    await monitor.audioContext.close().catch((error) => {
+      console.error("Failed to close the audio context.", error);
+    });
+  }
+
+  async function ensureVoiceMonitoring() {
+    if (!canListenRef.current || armingVoiceRef.current) {
+      return;
+    }
+
+    if (document.hidden || !windowFocusedRef.current) {
+      if (takeRef.current) {
+        setPhase("paused");
+      }
+      return;
+    }
+
+    const existingMonitor = voiceMonitorRef.current;
+    if (existingMonitor && canReuseStream(existingMonitor.stream)) {
+      if (existingMonitor.audioContext.state === "suspended") {
+        await existingMonitor.audioContext.resume().catch(() => null);
+      }
+
+      if (!takeRef.current) {
+        resetActiveTake();
+      }
+      resumeActiveTake();
+
+      setPhase("listening");
+      return;
+    }
+
     setErrorMessage(null);
-    setActiveDrawer(null);
+    setPhase("arming");
+    armingVoiceRef.current = true;
+
+    const AudioContextCtor =
+      window.AudioContext || (window as BrowserWindowWithWebkitAudioContext).webkitAudioContext;
+    if (!AudioContextCtor) {
+      armingVoiceRef.current = false;
+      setPhase("error");
+      setErrorMessage("This browser does not support microphone monitoring.");
+      return;
+    }
 
     try {
-      const sessionResponse = await fetch("/api/sessions", {
+      const stream = await getOrCreateAudioStream(existingMonitor?.stream);
+      const audioContext = new AudioContextCtor();
+      await audioContext.resume().catch(() => null);
+      const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
+      const silenceGain = audioContext.createGain();
+      silenceGain.gain.value = 0;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(processor);
+      processor.connect(silenceGain);
+      silenceGain.connect(audioContext.destination);
+
+      const monitor: VoiceMonitor = {
+        stream,
+        audioContext,
+        source,
+        processor,
+        silenceGain,
+        sampleRate: audioContext.sampleRate
+      };
+
+      if (!takeRef.current) {
+        resetActiveTake();
+      } else {
+        resumeActiveTake();
+      }
+
+      processor.addEventListener("audioprocess", (event) => {
+        if (voiceMonitorRef.current !== monitor) {
+          return;
+        }
+
+        const audioEvent = event as AudioProcessingEvent;
+        const input = new Float32Array(audioEvent.inputBuffer.getChannelData(0));
+        const activeTake = takeRef.current;
+        if (activeTake) {
+          activeTake.audioPcmChunks.push(input);
+        }
+      });
+
+      voiceMonitorRef.current = monitor;
+      setPhase("listening");
+    } catch (error) {
+      setPhase("error");
+      setErrorMessage(error instanceof Error ? error.message : "Unable to access the microphone.");
+    } finally {
+      armingVoiceRef.current = false;
+    }
+  }
+
+  async function hydrateRecentSessions(summaries: SessionSummary[]) {
+    setGalleryItems((current) => {
+      const bySessionId = new Map(current.map((item) => [item.sessionId, item]));
+      for (const summary of summaries) {
+        if (!bySessionId.has(summary.id)) {
+          bySessionId.set(summary.id, buildPlaceholderGalleryItem(summary));
+        }
+      }
+
+      return sortGalleryItems(Array.from(bySessionId.values()));
+    });
+
+    await Promise.allSettled(
+      summaries.map(async (summary) => {
+        const session = await fetchSessionDetail(summary.id);
+        if (!session) {
+          return;
+        }
+
+        sessionDetailsRef.current.set(summary.id, session);
+        upsertGalleryItem(buildGalleryItemFromSession(session, buildPlaceholderGalleryItem(summary).target));
+      })
+    );
+  }
+
+  async function markGalleryItemFailed(sessionId: string, target: OutputTarget, message: string) {
+    try {
+      const refreshedSession = await fetchSessionDetail(sessionId);
+      if (refreshedSession) {
+        sessionDetailsRef.current.set(sessionId, refreshedSession);
+        const nextItem = buildGalleryItemFromSession(refreshedSession, target);
+        upsertGalleryItem({
+          ...nextItem,
+          status: "failed",
+          statusLabel: "Failed",
+          detail: message
+        });
+        return;
+      }
+    } catch (error) {
+      console.error("Failed to refresh the failed gallery item.", error);
+    }
+
+    patchGalleryItem(sessionId, (item) => ({
+      ...item,
+      status: "failed",
+      statusLabel: "Failed",
+      detail: message
+    }));
+  }
+
+  function markTemporaryGalleryItemFailed(sessionId: string, message: string) {
+    patchGalleryItem(sessionId, (item) => ({
+      ...item,
+      status: "failed",
+      statusLabel: "Failed",
+      detail: message
+    }));
+  }
+
+  async function submitFinalizedCapture(capture: CompletedCapture, options: FinalizeOptionsSnapshot) {
+    let session: SessionSummary | null = null;
+    let gallerySessionId = capture.tempId;
+
+    try {
+      patchGalleryItem(capture.tempId, (item) => ({
+        ...item,
+        status: "pending",
+        statusLabel: "Uploading",
+        detail: "Sending the sketch, audio, transcript, and timeline into the pipeline."
+      }));
+
+      session = await createSessionOnServer(capture.title);
+      gallerySessionId = session.id;
+
+      const serverPendingItem = buildPendingGalleryItem({
+        sessionId: session.id,
+        title: session.title,
+        createdAt: session.createdAt,
+        target: options.target,
+        sketchThumbnailUrl: capture.sketchDataUrl
+      });
+
+      await new Promise((resolve) => window.setTimeout(resolve, SKETCH_FLIGHT_REPLACE_DELAY_MS));
+      replaceGalleryItem(capture.tempId, {
+        ...serverPendingItem,
+        status: "pending",
+        statusLabel: "Uploading",
+        detail: "Sending the sketch, audio, transcript, and timeline into the pipeline."
+      });
+
+      const uploadForm = new FormData();
+      uploadForm.append(
+        "audio",
+        new File([capture.audioBlob], "audio.wav", {
+          type: capture.audioMimeType
+        })
+      );
+      if (capture.sketchBlob) {
+        uploadForm.append(
+          "sketch",
+          new File([capture.sketchBlob], "sketch.png", {
+            type: "image/png"
+          })
+        );
+      }
+      uploadForm.append("events", JSON.stringify(capture.events));
+      uploadForm.append("durationMs", String(capture.durationMs));
+      uploadForm.append("canvasWidth", String(DEMO_CANVAS.width));
+      uploadForm.append("canvasHeight", String(DEMO_CANVAS.height));
+
+      const uploadResponse = await fetch(`/api/sessions/${session.id}/upload`, {
+        method: "POST",
+        body: uploadForm
+      });
+      const uploadPayload = await uploadResponse.json().catch(() => null);
+      if (!uploadResponse.ok) {
+        throw new Error(readRouteError(uploadPayload, "Failed to upload the session."));
+      }
+
+      patchGalleryItem(gallerySessionId, (item) => ({
+        ...item,
+        status: "running",
+        statusLabel: "Transcribing",
+        detail: "Transcribing the take with gpt-4o-mini-transcribe."
+      }));
+
+      const processResponse = await fetch(`/api/sessions/${session.id}/process`, {
+        method: "POST"
+      });
+      const processPayload = await processResponse.json().catch(() => null);
+      if (!processResponse.ok) {
+        throw new Error(readRouteError(processPayload, "Failed to transcribe the session."));
+      }
+
+      patchGalleryItem(gallerySessionId, (item) => ({
+        ...item,
+        status: "running",
+        statusLabel: "Rendering",
+        detail:
+          options.target === "image"
+            ? "Rendering the final image."
+            : options.target === "world"
+              ? "Rendering the source image for the 3D world."
+              : options.target === "video"
+                ? "Rendering the source image for the video."
+                : "Preparing the labeled sketch for website generation."
+      }));
+
+      const createResponse = await fetch(`/api/sessions/${session.id}/create`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          title: makeTitle(),
-          analysisReasoningEffort,
-          imageSizePreset,
-          imageGenerationProfile
+          target: options.target,
+          reasoningEffort: options.reasoningEffort,
+          imageSizePreset: options.imageSizePreset,
+          imageGenerationProfile: options.imageGenerationProfile,
+          videoModelPreset: options.videoModelPreset,
+          videoPipelineMode: options.videoPipelineMode
         })
       });
-
-      if (!sessionResponse.ok) {
-        throw new Error("Failed to create a session.");
+      const createPayload = await createResponse.json().catch(() => null);
+      if (!createResponse.ok) {
+        throw new Error(
+          readRouteError(
+            createPayload,
+            options.target === "world"
+              ? "Failed to create the 3D world from this session."
+              : options.target === "video"
+                ? "Failed to create the video from this session."
+                : options.target === "website"
+                  ? "Failed to create the website from this session."
+                  : "Failed to generate the image from this session."
+          )
+        );
       }
 
-      const session = (await sessionResponse.json()) as SessionSummary;
-      sessionIdRef.current = session.id;
+      let nextSession = createPayload?.session as SessionDetail;
+      if (!nextSession) {
+        throw new Error("Create route returned no session payload.");
+      }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true
-      });
-      mediaStreamRef.current = stream;
+      if (options.target === "video" && createPayload?.job) {
+        nextSession = mergeVideoJobIntoSession(nextSession, createPayload.job as VideoJob);
+      }
 
-      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "audio/webm";
+      if (options.target === "world" && createPayload?.job) {
+        nextSession = mergeWorldJobIntoSession(nextSession, createPayload.job as WorldJob);
+      }
 
-      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
+      if (options.target === "website" && createPayload?.job) {
+        nextSession = mergeWebsiteJobIntoSession(nextSession, createPayload.job as WebsiteJob);
+      }
 
-      recorder.addEventListener("dataavailable", (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-        }
-      });
-
-      recorder.addEventListener("stop", async () => {
-        const activeSessionId = sessionIdRef.current;
-        if (!activeSessionId) {
-          return;
-        }
-
-        setPhase("uploading");
-
-        try {
-          const durationMs = getEventTime();
-          const audioType = recorder.mimeType || "audio/webm";
-          const audioBlob = new Blob(audioChunksRef.current, { type: audioType });
-          const sketchBlob = await new Promise<Blob | null>((resolve) => {
-            const canvas = canvasRef.current;
-            if (!canvas) {
-              resolve(null);
-              return;
-            }
-            canvas.toBlob((blob) => resolve(blob), "image/png");
-          });
-          const uploadForm = new FormData();
-          uploadForm.append("audio", new File([audioBlob], "audio.webm", { type: audioType }));
-          if (sketchBlob) {
-            uploadForm.append("sketch", new File([sketchBlob], "sketch.png", { type: "image/png" }));
-          }
-          uploadForm.append("events", JSON.stringify(eventsRef.current));
-          uploadForm.append("durationMs", String(durationMs));
-          uploadForm.append("canvasWidth", String(DEMO_CANVAS.width));
-          uploadForm.append("canvasHeight", String(DEMO_CANVAS.height));
-
-          const uploadResponse = await fetch(`/api/sessions/${activeSessionId}/upload`, {
-            method: "POST",
-            body: uploadForm
-          });
-
-          if (!uploadResponse.ok) {
-            const payload = await uploadResponse.json().catch(() => ({}));
-            throw new Error(payload.error || "Failed to upload session.");
-          }
-
-          setPhase("processing");
-
-          const processResponse = await fetch(`/api/sessions/${activeSessionId}/process`, {
-            method: "POST"
-          });
-
-          if (!processResponse.ok) {
-            const payload = await processResponse.json().catch(() => ({}));
-            throw new Error(payload.error || "Failed to transcribe the recording.");
-          }
-
-          setPhase("creating");
-
-          const createResponse = await fetch(`/api/sessions/${activeSessionId}/create`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-              target: outputTarget,
-              reasoningEffort: analysisReasoningEffort,
-              imageSizePreset,
-              imageGenerationProfile,
-              videoModelPreset,
-              videoPipelineMode
-            })
-          });
-
-          const createPayload = await createResponse.json().catch(() => ({}));
-          if (!createResponse.ok) {
-            throw new Error(
-              createPayload.error ||
-                (outputTarget === "world"
-                  ? "Failed to create the 3D world from this session."
-                  : outputTarget === "video"
-                    ? "Failed to create the video from this session."
-                  : "Failed to generate the image from this session.")
-            );
-          }
-
-          await refreshRecentSessions();
-          if (outputTarget === "world" && createPayload.job?.id) {
-            router.push(`/sessions/${activeSessionId}/worlds/${createPayload.job.id}`);
-            return;
-          }
-
-          if (outputTarget === "video" && createPayload.job?.id) {
-            router.push(`/sessions/${activeSessionId}/videos/${createPayload.job.id}`);
-            return;
-          }
-
-          router.push(`/sessions/${activeSessionId}/image`);
-        } catch (error) {
-          setPhase("error");
-          setErrorMessage(error instanceof Error ? error.message : "Failed to finish the session.");
-          await refreshRecentSessions();
-        }
-      });
-
-      drawingStateRef.current = createEmptyDrawingState();
-      eventsRef.current = [];
-      activeStrokeIdRef.current = null;
-      startedAtRef.current = performance.now();
-      redrawCanvas();
-
-      recorder.start();
-      setPhase("recording");
-      await refreshRecentSessions();
+      sessionDetailsRef.current.set(gallerySessionId, nextSession);
+      upsertGalleryItem(buildGalleryItemFromSession(nextSession, options.target));
     } catch (error) {
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-        mediaStreamRef.current = null;
+      const message = error instanceof Error ? error.message : "Failed to finish the session.";
+      if (session) {
+        await markGalleryItemFailed(session.id, options.target, message);
+        return;
       }
-      setPhase("error");
-      setErrorMessage(error instanceof Error ? error.message : "Unable to start recording.");
+
+      markTemporaryGalleryItemFailed(capture.tempId, message);
     }
   }
 
-  function stopRecording() {
-    setActiveDrawer(null);
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state === "inactive") {
+  function enqueueFinalizedCapture(capture: CompletedCapture, options: FinalizeOptionsSnapshot) {
+    const queuedSubmission = submissionQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await submitFinalizedCapture(capture, options);
+      });
+
+    submissionQueueRef.current = queuedSubmission.catch(() => undefined);
+    return queuedSubmission;
+  }
+
+  async function stopVoiceForInvisibility(
+    _message: string,
+    options?: {
+      keepalive?: boolean;
+      suppressUi?: boolean;
+    }
+  ) {
+    pauseActiveTake();
+    activeStrokeIdRef.current = null;
+    await stopVoiceMonitoring({
+      stopTracks: true,
+      keepalive: options?.keepalive
+    });
+
+    if (!options?.suppressUi) {
+      setPhase(takeRef.current ? "paused" : "idle");
+      setErrorMessage(null);
+    } else {
+      setPhase(takeRef.current ? "paused" : "idle");
+    }
+  }
+
+  async function handleGo() {
+    const monitor = voiceMonitorRef.current;
+    const activeTake = takeRef.current;
+    if (phase !== "listening" || !hasSketchContent || !monitor || !activeTake) {
       return;
     }
 
-    recorder.stop();
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
+    setActiveDrawer(null);
+    setErrorMessage(null);
+    setPhase("handoff");
+
+    try {
+      const options = getFinalizeOptionsSnapshot();
+      const sketchBlob = await getCanvasSnapshotBlob();
+      const sketchDataUrl = getCanvasSnapshotDataUrl();
+      const takeSnapshot = {
+        ...activeTake,
+        audioPcmChunks: clonePcmChunks(activeTake.audioPcmChunks),
+        events: cloneDrawingEvents(eventsRef.current),
+        sketchBlob,
+        sketchDataUrl
+      };
+
+      resetBoard();
+      resetActiveTake();
+      setPhase("listening");
+
+      const previewId = crypto.randomUUID();
+      const pendingItem = buildPendingGalleryItem({
+        sessionId: previewId,
+        title: takeSnapshot.title,
+        createdAt: takeSnapshot.createdAt,
+        target: options.target,
+        sketchThumbnailUrl: takeSnapshot.sketchDataUrl
+      });
+
+      upsertGalleryItem(pendingItem);
+      launchSketchFlight(previewId, takeSnapshot.sketchDataUrl);
+
+      void (async () => {
+        try {
+          const audioSamples = concatPcmChunks(takeSnapshot.audioPcmChunks);
+          const audioMimeType = "audio/wav";
+
+          const completedCapture: CompletedCapture = {
+            tempId: previewId,
+            title: takeSnapshot.title,
+            createdAt: takeSnapshot.createdAt,
+            events: takeSnapshot.events,
+            sketchBlob: takeSnapshot.sketchBlob,
+            sketchDataUrl: takeSnapshot.sketchDataUrl,
+            audioBlob: new Blob([encodeMonoPcmWav(audioSamples, monitor.sampleRate)], { type: audioMimeType }),
+            audioMimeType,
+            durationMs: Math.round((audioSamples.length / monitor.sampleRate) * 1000)
+          };
+
+          await enqueueFinalizedCapture(completedCapture, options);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Failed to move the current canvas into the gallery.";
+          markTemporaryGalleryItemFailed(previewId, message);
+          setErrorMessage(message);
+        }
+      })();
+    } catch (error) {
+      setPhase("error");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to move the current canvas into the gallery.");
+    }
   }
 
+  async function refreshGalleryItem(item: RecorderGalleryItem) {
+    if (pollingSessionsRef.current.has(item.sessionId)) {
+      return;
+    }
+
+    pollingSessionsRef.current.add(item.sessionId);
+
+    try {
+      const session = await fetchSessionDetail(item.sessionId);
+      if (!session) {
+        return;
+      }
+
+      let nextSession = session;
+      if (item.target === "video" && item.jobId) {
+        const response = await fetch(`/api/sessions/${item.sessionId}/videos/${item.jobId}`, {
+          cache: "no-store"
+        });
+        const payload = await response.json().catch(() => null);
+        const job = (response.ok ? payload : payload?.job) as VideoJob | null;
+        if (job) {
+          nextSession = mergeVideoJobIntoSession(nextSession, job);
+        }
+      }
+
+      if (item.target === "world" && item.jobId) {
+        const response = await fetch(`/api/sessions/${item.sessionId}/worlds/${item.jobId}`, {
+          cache: "no-store"
+        });
+        const payload = await response.json().catch(() => null);
+        const job = (response.ok ? payload : payload?.job) as WorldJob | null;
+        if (job) {
+          nextSession = mergeWorldJobIntoSession(nextSession, job);
+        }
+      }
+
+      if (item.target === "website" && item.jobId) {
+        const response = await fetch(`/api/sessions/${item.sessionId}/websites/${item.jobId}`, {
+          cache: "no-store"
+        });
+        const payload = await response.json().catch(() => null);
+        const job = (response.ok ? payload : payload?.job) as WebsiteJob | null;
+        if (job) {
+          nextSession = mergeWebsiteJobIntoSession(nextSession, job);
+        }
+      }
+
+      sessionDetailsRef.current.set(item.sessionId, nextSession);
+      const nextItem = buildGalleryItemFromSession(nextSession, item.target);
+      upsertGalleryItem(preserveQueuedSketchPreview(item, nextItem));
+    } catch (error) {
+      console.error("Failed to refresh a gallery item.", error);
+    } finally {
+      pollingSessionsRef.current.delete(item.sessionId);
+    }
+  }
+
+  useEffect(() => {
+    void hydrateRecentSessions(initialSessions);
+  }, [initialSessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || document.hidden) {
+        return;
+      }
+
+      const pendingItems = galleryItemsRef.current.filter(
+        (item) => item.status === "pending" || item.status === "running"
+      );
+      await Promise.allSettled(pendingItems.map((item) => refreshGalleryItem(item)));
+    };
+
+    const interval = window.setInterval(() => {
+      void tick();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authEnabled && !viewer) {
+      takeRef.current = null;
+      void stopVoiceMonitoring();
+      setPhase("idle");
+      return;
+    }
+
+    void ensureVoiceMonitoring();
+  }, [authEnabled, viewer]);
+
+  useEffect(() => {
+    windowFocusedRef.current = document.hasFocus();
+
+    const pauseForLifecycle = (reason: string, options?: { keepalive?: boolean; suppressUi?: boolean }) => {
+      void enqueueLifecycleTransition(async () => {
+        await stopVoiceForInvisibility(reason, options);
+      });
+    };
+
+    const resumeAfterLifecycle = () => {
+      if (document.hidden || !windowFocusedRef.current) {
+        return;
+      }
+
+      void enqueueLifecycleTransition(async () => {
+        await ensureVoiceMonitoring();
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        pauseForLifecycle("Voice paused because this canvas was no longer visible.", {
+          suppressUi: true
+        });
+      } else {
+        resumeAfterLifecycle();
+      }
+    };
+
+    const handleWindowBlur = () => {
+      windowFocusedRef.current = false;
+      pauseForLifecycle("Voice paused because this canvas lost focus.", {
+        suppressUi: true
+      });
+    };
+
+    const handleWindowFocus = () => {
+      windowFocusedRef.current = true;
+      resumeAfterLifecycle();
+    };
+
+    const handlePageHide = () => {
+      pauseForLifecycle("Voice paused because this canvas was no longer visible.", {
+        keepalive: true,
+        suppressUi: true
+      });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", handleWindowBlur);
+    window.addEventListener("focus", handleWindowFocus);
+    window.addEventListener("pagehide", handlePageHide);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", handleWindowBlur);
+      window.removeEventListener("focus", handleWindowFocus);
+      window.removeEventListener("pagehide", handlePageHide);
+
+      void enqueueLifecycleTransition(async () => {
+        await stopVoiceMonitoring({
+          stopTracks: true,
+          keepalive: true
+        });
+      });
+    };
+  }, []);
+
   function handlePointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (phase !== "recording") {
+    if (authEnabled && !viewer) {
+      setErrorMessage(null);
+      setAuthNotice("Sign in to start sketching, recording, and saving sessions.");
+      setAuthPromptVisible(true);
       return;
     }
 
@@ -412,7 +1177,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   }
 
   function handlePointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (phase !== "recording" || !activeStrokeIdRef.current) {
+    if (!activeStrokeIdRef.current) {
       return;
     }
 
@@ -428,7 +1193,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
   }
 
   function finishStroke(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (phase !== "recording" || !activeStrokeIdRef.current) {
+    if (!activeStrokeIdRef.current) {
       return;
     }
 
@@ -444,10 +1209,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
     activeStrokeIdRef.current = null;
   }
 
-  const isBusy = phase === "uploading" || phase === "processing" || phase === "creating";
-  const phaseCopy = getPhaseCopy(phase, outputTarget, errorMessage);
-  const isRecording = phase === "recording";
-  const boardOverlayVisible = phase === "uploading" || phase === "processing" || phase === "creating" || phase === "error";
+  const controlTransitioning = phase === "arming" || phase === "handoff";
 
   return (
     <main className="recorder-experience-page">
@@ -458,17 +1220,15 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
         <header className="recorder-experience-header">
           <div className="recorder-brandline">
             <div className="recorder-brand-mark">Synk</div>
-            <p className="recorder-brand-copy-inline">Sketch and speak into an image, video, or even a 3D world.</p>
+            <p className="recorder-brand-copy-inline">
+              Sketch and speak anything into existence
+            </p>
           </div>
 
           <div className="recorder-header-actions">
-            <button
-              type="button"
-              className="recorder-hud-button"
-              onClick={() => setActiveDrawer(activeDrawer === "recent" ? null : "recent")}
-            >
-              Recent
-            </button>
+            <Link href={(viewer ? "/dashboard" : signInHref) as Route} className="recorder-hud-button">
+              {viewer ? "Dashboard" : "Sign in"}
+            </Link>
             <button
               type="button"
               className="recorder-hud-button"
@@ -479,137 +1239,148 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
           </div>
         </header>
 
-        <section className="recorder-board-stage">
-          <div className="canvas-frame recorder-board-frame">
-            <canvas
-              ref={canvasRef}
-              width={DEMO_CANVAS.width}
-              height={DEMO_CANVAS.height}
-              className="recording-canvas"
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={finishStroke}
-              onPointerCancel={finishStroke}
-            />
-
-            {boardOverlayVisible ? (
-              <div className="recorder-board-overlay">
-                <div className="recorder-board-overlay-card">
-                  <p className="recorder-board-kicker">{phaseCopy.label}</p>
-                  <h2>{phaseCopy.title}</h2>
-                  <p>{phaseCopy.detail}</p>
-                </div>
+        {authNotice || errorMessage || setupMessage ? (
+          <div className="recorder-floating-alert">
+            <p className="recorder-floating-alert-copy">{authNotice ?? errorMessage ?? setupMessage}</p>
+            {authPromptVisible && authEnabled && !viewer ? (
+              <div className="recorder-floating-alert-actions">
+                <Link href={signInHref as Route} className="recorder-hud-button recorder-hud-button-strong">
+                  Log in / Sign up
+                </Link>
+                <button
+                  type="button"
+                  className="recorder-hud-button"
+                  onClick={() => {
+                    setAuthPromptVisible(false);
+                    setAuthNotice(null);
+                  }}
+                >
+                  Not now
+                </button>
               </div>
             ) : null}
           </div>
-        </section>
+        ) : null}
 
-        {errorMessage ? <div className="recorder-floating-alert">{errorMessage}</div> : null}
-
-        <div className="recorder-bottom-controls">
-          <div className="recorder-bottom-dock">
-            <div className="recorder-target-cluster">
-              <span className="recorder-dock-label">Destination</span>
-              <div className="segmented-control recorder-destination-control">
-                <button
-                  type="button"
-                  className={outputTarget === "image" ? "active" : ""}
-                  onClick={() => setOutputTarget("image")}
-                  disabled={isRecording || isBusy}
-                >
-                  Image
-                </button>
-                <button
-                  type="button"
-                  className={outputTarget === "world" ? "active" : ""}
-                  onClick={() => setOutputTarget("world")}
-                  disabled={isRecording || isBusy}
-                >
-                  3D world
-                </button>
-                <button
-                  type="button"
-                  className={outputTarget === "video" ? "active" : ""}
-                  onClick={() => setOutputTarget("video")}
-                  disabled={isRecording || isBusy}
-                >
-                  Video
-                </button>
+        <div className="recorder-workspace">
+          <section className="recorder-canvas-pane">
+            <div className="recorder-board-stage">
+              <div ref={canvasFrameRef} className="canvas-frame recorder-board-frame">
+                <canvas
+                  ref={canvasRef}
+                  width={DEMO_CANVAS.width}
+                  height={DEMO_CANVAS.height}
+                  className="recording-canvas"
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={finishStroke}
+                  onPointerCancel={finishStroke}
+                />
               </div>
             </div>
 
-            {phase === "idle" || phase === "error" ? (
-              <button
-                type="button"
-                className="primary-button recorder-primary-button recorder-cta-button"
-                onClick={startRecording}
-              >
-                Start sketching
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="primary-button stop-button recorder-primary-button recorder-cta-button"
-                onClick={stopRecording}
-                disabled={isBusy}
-              >
-                {outputTarget === "world"
-                  ? "Finish and build 3D world"
-                  : outputTarget === "video"
-                    ? "Finish and build video"
-                    : "Finish and generate image"}
-              </button>
-            )}
-          </div>
+            <div className="recorder-bottom-controls recorder-bottom-controls-inline">
+              <div className="recorder-bottom-dock">
+                <div className="recorder-target-cluster">
+                  <span className="recorder-dock-label">Destination</span>
+                  <div className="segmented-control recorder-destination-control">
+                    <button
+                      type="button"
+                      className={outputTarget === "image" ? "active" : ""}
+                      onClick={() => setOutputTarget("image")}
+                      disabled={controlTransitioning}
+                    >
+                      Image
+                    </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "world" ? "active" : ""}
+                      onClick={() => setOutputTarget("world")}
+                      disabled={controlTransitioning}
+                    >
+                      3D world
+                    </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "video" ? "active" : ""}
+                      onClick={() => setOutputTarget("video")}
+                      disabled={controlTransitioning}
+                    >
+                      Video
+                    </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "website" ? "active" : ""}
+                      onClick={() => setOutputTarget("website")}
+                      disabled={controlTransitioning || !websiteEnabled}
+                    >
+                      Website
+                    </button>
+                  </div>
+                </div>
+
+                {phase === "listening" && hasSketchContent ? (
+                  <button
+                    type="button"
+                    className="primary-button stop-button recorder-primary-button recorder-cta-button recorder-go-button"
+                    onClick={handleGo}
+                    disabled={controlTransitioning}
+                    aria-label="Go generate this take"
+                  >
+                    Go
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </section>
+
+          <aside className="recorder-gallery-panel">
+            <div className="recorder-gallery-body recorder-gallery-body-compact">
+              {galleryItems.map((item) => {
+                const thumb = (
+                  <div className="recorder-gallery-card-thumb">
+                    {item.thumbnailUrl ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={item.thumbnailUrl} alt="" className="recorder-gallery-image" />
+                    ) : (
+                      <div className="recorder-gallery-placeholder" />
+                    )}
+                    {item.status === "pending" || item.status === "running" ? (
+                      <span className="recorder-gallery-spinner" aria-hidden="true" />
+                    ) : null}
+                  </div>
+                );
+
+                return (
+                  <article
+                    key={item.sessionId}
+                    ref={(node) => setGalleryCardRef(item.sessionId, node)}
+                    className={getGalleryCardClass(item)}
+                  >
+                    {item.href ? (
+                      <Link
+                        href={item.href as Route}
+                        className="recorder-gallery-card-link recorder-gallery-card-link-compact"
+                        aria-label={`Open ${item.title}`}
+                        title={item.title}
+                      >
+                        {thumb}
+                      </Link>
+                    ) : (
+                      <div className="recorder-gallery-card-link recorder-gallery-card-link-compact" title={item.title}>
+                        {thumb}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          </aside>
         </div>
 
         {activeDrawer ? <button type="button" className="recorder-drawer-scrim" onClick={() => setActiveDrawer(null)} /> : null}
 
         <aside className={`recorder-drawer ${activeDrawer ? "open" : ""}`}>
-          {activeDrawer === "recent" ? (
-            <>
-              <div className="recorder-drawer-header">
-                <div>
-                  <p className="recorder-drawer-kicker">Recent</p>
-                  <h2>Saved sessions</h2>
-                </div>
-                <div className="recorder-drawer-actions">
-                  <button type="button" className="recorder-hud-button" onClick={refreshRecentSessions}>
-                    Refresh
-                  </button>
-                  <button type="button" className="recorder-hud-button" onClick={() => setActiveDrawer(null)}>
-                    Close
-                  </button>
-                </div>
-              </div>
-
-              <div className="recorder-drawer-body">
-                <div className="session-list">
-                  {sessions.length === 0 ? (
-                    <p className="empty-copy">No sessions yet. Record one to populate the replay list.</p>
-                  ) : (
-                    sessions.map((session) => (
-                      <Link
-                        key={session.id}
-                        href={(session.preferredResultUrl ?? `/sessions/${session.id}`) as Route}
-                        className="session-link"
-                        onClick={() => setActiveDrawer(null)}
-                      >
-                        <div>
-                          <p className="session-title">{session.title}</p>
-                          <p className="session-meta">
-                            {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)}
-                          </p>
-                        </div>
-                        <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
-                      </Link>
-                    ))
-                  )}
-                </div>
-              </div>
-            </>
-          ) : null}
-
           {activeDrawer === "settings" ? (
             <>
               <div className="recorder-drawer-header">
@@ -630,7 +1401,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                       type="button"
                       className={outputTarget === "image" ? "active" : ""}
                       onClick={() => setOutputTarget("image")}
-                      disabled={isRecording || isBusy}
+                      disabled={controlTransitioning}
                     >
                       Image
                     </button>
@@ -638,7 +1409,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                       type="button"
                       className={outputTarget === "world" ? "active" : ""}
                       onClick={() => setOutputTarget("world")}
-                      disabled={isRecording || isBusy}
+                      disabled={controlTransitioning}
                     >
                       3D world
                     </button>
@@ -646,12 +1417,20 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                       type="button"
                       className={outputTarget === "video" ? "active" : ""}
                       onClick={() => setOutputTarget("video")}
-                      disabled={isRecording || isBusy}
+                      disabled={controlTransitioning}
                     >
                       Video
                     </button>
+                    <button
+                      type="button"
+                      className={outputTarget === "website" ? "active" : ""}
+                      onClick={() => setOutputTarget("website")}
+                      disabled={controlTransitioning || !websiteEnabled}
+                    >
+                      Website
+                    </button>
                   </div>
-                  <p className="recorder-settings-copy">{outputTargetSummary(outputTarget)}</p>
+                  <p className="recorder-settings-copy">{outputTargetSummary(outputTarget, websiteEnabled)}</p>
                 </section>
 
                 <section className="recorder-settings-section">
@@ -663,7 +1442,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={videoPipelineMode === mode ? "active" : ""}
                         onClick={() => setVideoPipelineMode(mode)}
-                        disabled={isRecording || isBusy}
+                        disabled={controlTransitioning}
                       >
                         {mode === "normal" ? "Normal" : "Dynamic"}
                       </button>
@@ -685,7 +1464,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={videoModelPreset === preset ? "active" : ""}
                         onClick={() => setVideoModelPreset(preset)}
-                        disabled={isRecording || isBusy}
+                        disabled={controlTransitioning}
                       >
                         {preset === "quality" ? "Quality" : "Lite"}
                       </button>
@@ -707,7 +1486,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={imageGenerationProfile === profile ? "active" : ""}
                         onClick={() => setImageGenerationProfile(profile)}
-                        disabled={isRecording || isBusy}
+                        disabled={controlTransitioning}
                       >
                         {profile === "pro" ? "Pro" : "Fast"}
                       </button>
@@ -729,7 +1508,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={analysisReasoningEffort === effort ? "active" : ""}
                         onClick={() => setAnalysisReasoningEffort(effort)}
-                        disabled={isRecording || isBusy}
+                        disabled={controlTransitioning}
                       >
                         {effort}
                       </button>
@@ -746,7 +1525,7 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                         type="button"
                         className={imageSizePreset === preset ? "active" : ""}
                         onClick={() => setImageSizePreset(preset)}
-                        disabled={isRecording || isBusy || imageGenerationProfile === "fast"}
+                        disabled={controlTransitioning || imageGenerationProfile === "fast"}
                       >
                         {preset}
                       </button>
@@ -762,14 +1541,38 @@ export function RecorderShell({ initialSessions }: { initialSessions: SessionSum
                 <section className="recorder-settings-section">
                   <span className="recorder-tool-label">Pipeline</span>
                   <p className="recorder-settings-copy">
-                    Chrome demo path: MediaRecorder, local drawing timeline, server transcription, grounded image
-                    generation, and optional World Labs world build.
+                    Chrome demo path: Web Audio PCM capture, OpenAI Realtime transcription with server VAD,
+                    local drawing timeline, inline gallery tracking, and optional World Labs world build.
                   </p>
                 </section>
               </div>
             </>
           ) : null}
         </aside>
+
+        {flight ? (
+          <div
+            className={`recorder-flight-thumb ${flight.phase === "animating" ? "animating" : ""}`}
+            style={
+              flight.phase === "animating" && flight.to
+                ? {
+                    top: flight.to.top,
+                    left: flight.to.left,
+                    width: flight.to.width,
+                    height: flight.to.height
+                  }
+                : {
+                    top: flight.from.top,
+                    left: flight.from.left,
+                    width: flight.from.width,
+                    height: flight.from.height
+                  }
+            }
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={flight.imageUrl} alt="" />
+          </div>
+        ) : null}
       </div>
     </main>
   );

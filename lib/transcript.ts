@@ -7,10 +7,10 @@ interface RawToken {
   confidence?: number;
 }
 
-const DEFAULT_TRANSCRIBE_MODEL = "whisper-1";
-const TIMESTAMP_FALLBACK_MODEL = "whisper-1";
+const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
+const TIMESTAMP_FALLBACK_MODEL = "gpt-4o-mini-transcribe";
 const TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions";
-const TRANSCRIPTION_PROMPT =
+export const TRANSCRIPTION_PROMPT =
   "This audio may include Chinese, English, and mixed technical terms. Preserve original wording.";
 
 function secondsToMs(value: unknown, fallback: number) {
@@ -112,6 +112,50 @@ function splitMixedToken(text: string) {
   return pieces;
 }
 
+export function normalizeTranscriptSpan(
+  text: string,
+  startMs: number,
+  endMs: number,
+  idPrefix: string
+): TranscriptNormalizationResult {
+  const pieces = splitMixedToken(text);
+  if (pieces.length === 0) {
+    return {
+      tokens: [],
+      approximate: false
+    };
+  }
+
+  const safeStart = Math.max(0, Math.round(startMs));
+  const safeEnd = Math.max(safeStart + pieces.length, Math.round(endMs));
+  const sliceSize = Math.max(1, safeEnd - safeStart) / pieces.length;
+  const tokens: TranscriptToken[] = [];
+
+  pieces.forEach((piece, pieceIndex) => {
+    const pieceStartMs =
+      pieces.length === 1 ? safeStart : Math.round(safeStart + pieceIndex * sliceSize);
+    const pieceEndMs =
+      pieces.length === 1
+        ? safeEnd
+        : Math.round(pieceIndex === pieces.length - 1 ? safeEnd : safeStart + (pieceIndex + 1) * sliceSize);
+
+    tokens.push({
+      id: `${idPrefix}-${pieceIndex}`,
+      text: piece.text,
+      startMs: pieceStartMs,
+      endMs: Math.max(pieceStartMs + 1, pieceEndMs),
+      granularity: piece.granularity,
+      lang: piece.lang || normalizeLang(piece.text),
+      approximate: pieces.length > 1
+    });
+  });
+
+  return {
+    tokens,
+    approximate: pieces.length > 1
+  };
+}
+
 function coerceRawTokens(payload: any, durationMs: number): RawToken[] {
   if (Array.isArray(payload?.words) && payload.words.length > 0) {
     return payload.words
@@ -159,34 +203,14 @@ export function normalizeTranscript(payload: any, durationMs: number): Transcrip
       return;
     }
 
-    const safeStart = Math.max(0, rawToken.startMs);
-    const safeEnd = Math.max(safeStart + pieces.length, rawToken.endMs);
-    const sliceSize = Math.max(1, safeEnd - safeStart) / pieces.length;
-
-    pieces.forEach((piece, pieceIndex) => {
-      const startMs =
-        pieces.length === 1 ? safeStart : Math.round(safeStart + pieceIndex * sliceSize);
-      const endMs =
-        pieces.length === 1
-          ? safeEnd
-          : Math.round(
-              pieceIndex === pieces.length - 1 ? safeEnd : safeStart + (pieceIndex + 1) * sliceSize
-            );
-
-      const pieceApproximate = pieces.length > 1;
-      approximate ||= pieceApproximate;
-
+    const normalized = normalizeTranscriptSpan(rawToken.text, rawToken.startMs, rawToken.endMs, String(rawIndex));
+    normalized.tokens.forEach((token) => {
       tokens.push({
-        id: `${rawIndex}-${pieceIndex}`,
-        text: piece.text,
-        startMs,
-        endMs: Math.max(startMs + 1, endMs),
-        granularity: piece.granularity,
-        lang: piece.lang || normalizeLang(piece.text),
-        approximate: pieceApproximate,
+        ...token,
         confidence: rawToken.confidence
       });
     });
+    approximate ||= normalized.approximate;
   });
 
   return {

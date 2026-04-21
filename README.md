@@ -1,10 +1,10 @@
 # Synk Demo
 
-An internal demo for recording drawing events and microphone audio on the same timeline, replaying the board state with synchronized transcript tokens, and turning the finished sketch plus narration into a generated image.
+An internal demo for keeping microphone capture tied to the active canvas, replaying drawing events and microphone audio on the same timeline, and turning the finished sketch plus narration into a generated image, video, or 3D world.
 
 ## What it does
 
-- Records a desktop Chrome session with a canvas whiteboard and `MediaRecorder` audio.
+- Records a desktop Chrome canvas with `MediaRecorder` audio that stays on for the active canvas until the user presses `Go`.
 - Stores recent sessions on local disk under `data/sessions/`.
 - Replays drawing events against the audio timeline.
 - Calls the OpenAI transcription API when `OPENAI_API_KEY` is set.
@@ -42,11 +42,12 @@ npm run start
 ```
 
 5. Open `http://localhost:3000`.
-6. Record a session, then open the playback page and use:
+6. Start a new canvas, sketch and speak, then press `Go`.
+7. Open the playback page and use:
    - `Analyze with GPT-5.4`
    - `Generate image`
    - `Generate lite video` or `Generate quality video`
-   - `Preview 3D world` or `Generate HD world`
+   - `Generate HD world`
 
 ## Environment
 
@@ -100,7 +101,7 @@ Important:
 ## Notes
 
 - This is a demo, not a production system.
-- Storage is local filesystem only. There is no auth, cloud object storage, worker queue, or retry system.
+- Voice capture is scoped to the active canvas. If the page becomes hidden before you press `Go`, the microphone stops immediately and the unfinished draft session is discarded.
 - Chinese token timing is approximated when the transcription API does not return true character-level timestamps.
 - If you override the model to `gpt-4o-mini-transcribe` or `gpt-4o-transcribe`, the app will retry with `whisper-1` for timestamped replay data because those models may reject `verbose_json`.
 - Scene analysis is whole-transcript based. It does not do sentence-by-sentence grounding; instead it asks `gpt-5.4` for final objects plus verbatim evidence quotes, then maps those quotes back to timeline moments and nearby stroke clusters.

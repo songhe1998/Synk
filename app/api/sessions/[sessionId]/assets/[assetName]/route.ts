@@ -1,4 +1,5 @@
-import { getSessionAsset } from "@/lib/session-store";
+import { getOptionalViewer } from "@/lib/auth";
+import { getReadableSessionAsset, getReadableSessionDetail } from "@/lib/session-store";
 import { AssetKind } from "@/lib/types";
 
 function toAssetKind(assetName: string): AssetKind | null {
@@ -27,12 +28,18 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string; assetName: string }> }
 ) {
   const { sessionId, assetName } = await params;
+  const viewer = await getOptionalViewer();
+
+  if (!(await getReadableSessionDetail(sessionId, viewer?.id))) {
+    return new Response("Session not found", { status: 404 });
+  }
+
   const assetKind = toAssetKind(assetName);
   if (!assetKind) {
     return new Response("Unknown asset", { status: 404 });
   }
 
-  const asset = await getSessionAsset(sessionId, assetKind);
+  const asset = await getReadableSessionAsset(sessionId, assetKind, viewer?.id);
   if (!asset) {
     return new Response("Asset not found", { status: 404 });
   }

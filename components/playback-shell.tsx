@@ -15,6 +15,7 @@ import {
   VideoJob,
   VideoModelPreset,
   VideoPipelineMode,
+  WebsiteJob,
   WorldJob
 } from "@/lib/types";
 
@@ -85,6 +86,23 @@ function videoStatusLabel(status: VideoJob["status"]) {
   }
 }
 
+function websiteStatusLabel(status: WebsiteJob["status"]) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Generating";
+    case "building":
+      return "Building";
+    case "exporting":
+      return "Exporting";
+    case "succeeded":
+      return "Ready";
+    case "failed":
+      return "Failed";
+  }
+}
+
 function isAssetViewAvailable(session: SessionDetail, view: AssetView) {
   switch (view) {
     case "sketch":
@@ -121,7 +139,13 @@ function resolveAssetView(session: SessionDetail, preferred: AssetView | null) {
   return getDefaultAssetView(session);
 }
 
-export function PlaybackShell({ session }: { session: SessionDetail }) {
+export function PlaybackShell({
+  session,
+  websiteEnabled
+}: {
+  session: SessionDetail;
+  websiteEnabled: boolean;
+}) {
   const router = useRouter();
   const [sessionData, setSessionData] = useState(session);
   const [selectedAssetView, setSelectedAssetView] = useState<AssetView>(() => getDefaultAssetView(session));
@@ -145,6 +169,7 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
   const [analysisBusy, setAnalysisBusy] = useState(false);
   const [generationSourceBusy, setGenerationSourceBusy] = useState<ImageGenerationSource | null>(null);
   const [videoBusy, setVideoBusy] = useState(false);
+  const [websiteBusy, setWebsiteBusy] = useState(false);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   function cancelPlaybackLoop() {
@@ -382,6 +407,28 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
       setPipelineError(error instanceof Error ? error.message : "Video generation failed.");
     } finally {
       setVideoBusy(false);
+    }
+  }
+
+  async function startWebsiteGeneration() {
+    setPipelineError(null);
+    setWebsiteBusy(true);
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionData.id}/websites`, {
+        method: "POST"
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload.error || "Website generation failed.");
+      }
+
+      const job = payload as WebsiteJob;
+      router.push(`/sessions/${sessionData.id}/websites/${job.id}`);
+    } catch (error) {
+      setPipelineError(error instanceof Error ? error.message : "Website generation failed.");
+    } finally {
+      setWebsiteBusy(false);
     }
   }
 
@@ -817,6 +864,56 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
       <section className="panel world-launch-panel">
         <div className="panel-header">
           <div>
+            <p className="panel-kicker">Website</p>
+            <h2>Generate a website directly from the labeled sketch</h2>
+          </div>
+        </div>
+
+        <div className="creation-layout">
+          <div className="creation-summary">
+            <p className="analysis-title">Codex path</p>
+            <p className="analysis-copy">
+              Website generation sends the labeled sketch and transcript directly into Codex inside an isolated
+              Vercel Sandbox. Codex works inside a fixed Vite + React + TypeScript starter and must return a buildable
+              site.
+            </p>
+            <div className="analysis-summary-card">
+              <p className="analysis-subtitle">Input transcript</p>
+              <p className="analysis-copy">
+                {sessionData.analysis?.transcriptText || "Transcript is required before generating a website."}
+              </p>
+            </div>
+            <div className="analysis-summary-card">
+              <p className="analysis-subtitle">Reference asset</p>
+              {sessionData.annotatedSketchUrl ? (
+                <img src={sessionData.annotatedSketchUrl} alt="Website labeled sketch" className="asset-image" />
+              ) : (
+                <p className="empty-copy">Run analysis first to create the annotated sketch.</p>
+              )}
+            </div>
+          </div>
+
+          <div className="creation-actions">
+            <button
+              type="button"
+              className="primary-button creation-primary-button"
+              onClick={startWebsiteGeneration}
+              disabled={websiteBusy || !websiteEnabled || !sessionData.annotatedSketchUrl || !sessionData.transcript.length}
+            >
+              {websiteBusy ? "Starting website..." : "Generate website"}
+            </button>
+            <p className="creation-footnote">
+              {websiteEnabled
+                ? "The generated site is exported as a static build and previewed from stored artifacts, not from the live sandbox filesystem."
+                : "Website generation is disabled until Vercel Sandbox credentials are configured and the dev server is restarted."}
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel world-launch-panel">
+        <div className="panel-header">
+          <div>
             <p className="panel-kicker">Video</p>
             <h2>Create motion from the generated image</h2>
           </div>
@@ -913,6 +1010,40 @@ export function PlaybackShell({ session }: { session: SessionDetail }) {
               {videoBusy ? "Starting video..." : `Generate ${videoModelPreset === "quality" ? "quality" : "lite"} video`}
             </button>
           </div>
+        </div>
+      </section>
+
+      <section className="panel world-launch-panel">
+        <div className="panel-header">
+          <div>
+            <p className="panel-kicker">Website Jobs</p>
+            <h2>Open generated websites from this session</h2>
+          </div>
+        </div>
+
+        <div className="world-job-list">
+          {sessionData.websiteJobs.length === 0 ? (
+            <div className="analysis-summary-card">
+              <p className="analysis-copy">
+                No websites yet. Generate one from the panel above once the labeled sketch is ready.
+              </p>
+            </div>
+          ) : (
+            sessionData.websiteJobs.map((job) => (
+              <Link key={job.id} href={`/sessions/${sessionData.id}/websites/${job.id}`} className="world-job-link">
+                <div>
+                  <p className="session-title">{job.displayName}</p>
+                  <p className="session-meta">
+                    {formatRelativeDate(job.createdAt)} · Vite React · {job.pages.length} page
+                    {job.pages.length === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <span className={`status-badge status-${job.status === "succeeded" ? "ready" : job.status}`}>
+                  {websiteStatusLabel(job.status)}
+                </span>
+              </Link>
+            ))
+          )}
         </div>
       </section>
 

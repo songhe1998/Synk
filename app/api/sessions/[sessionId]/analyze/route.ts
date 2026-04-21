@@ -1,3 +1,5 @@
+import { requireApiViewer } from "@/lib/auth-route";
+import { getSessionDetail } from "@/lib/session-store";
 import { ensureSessionAnalysis } from "@/lib/session-pipeline";
 import { AnalysisReasoningEffort, ImageGenerationProfile } from "@/lib/types";
 import { NextResponse } from "next/server";
@@ -21,6 +23,15 @@ export async function POST(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}`);
+  if (response) {
+    return response;
+  }
+
+  if (!(await getSessionDetail(sessionId, viewer?.id))) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
   const body = await request.json().catch(() => ({}));
 
   try {

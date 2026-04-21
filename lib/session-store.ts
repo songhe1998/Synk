@@ -13,8 +13,28 @@ import {
   VideoSourcePlan,
   TranscriptToken
 } from "@/lib/types";
-import { listVideoJobs } from "@/lib/video-store";
-import { listWorldJobs } from "@/lib/world-store";
+import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
+import {
+  createSupabaseSession,
+  deleteSupabaseSession,
+  getSupabaseSessionAnalysis,
+  getSupabaseSessionAsset,
+  getSupabaseSessionAudio,
+  getSupabaseSessionDetail,
+  getSupabaseSessionVideoSourcePlan,
+  listSupabaseRecentSessions,
+  markSupabaseSessionFailed,
+  markSupabaseSessionProcessing,
+  saveSupabaseSessionAnalysis,
+  saveSupabaseSessionAsset,
+  saveSupabaseSessionTranscript,
+  saveSupabaseSessionUpload,
+  saveSupabaseSessionVideoSourcePlan,
+  updateSupabaseSessionPreferences
+} from "@/lib/supabase-session-store";
+import { listLocalVideoJobs, listVideoJobs } from "@/lib/video-store";
+import { listLocalWebsiteJobs, listWebsiteJobs } from "@/lib/website-store";
+import { listLocalWorldJobs, listWorldJobs } from "@/lib/world-store";
 
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 const INDEX_PATH = path.join(DATA_ROOT, "index.json");
@@ -136,6 +156,23 @@ async function writeIndex(summaries: SessionSummary[]) {
   await writeJsonAtomic(INDEX_PATH, ordered);
 }
 
+function sortRecentSummaries<T extends { createdAt: string }>(summaries: T[]) {
+  return [...summaries].sort(
+    (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()
+  );
+}
+
+function mergeRecentSummaries(summaries: SessionSummary[]) {
+  const byId = new Map<string, SessionSummary>();
+  for (const summary of sortRecentSummaries(summaries)) {
+    if (!byId.has(summary.id)) {
+      byId.set(summary.id, summary);
+    }
+  }
+
+  return Array.from(byId.values());
+}
+
 async function writeMeta(summary: SessionSummary) {
   await mkdir(getSessionDir(summary.id), { recursive: true });
   await writeJsonAtomic(getMetaPath(summary.id), normalizeSummary(summary));
@@ -198,23 +235,21 @@ function inferAudioExtension(mimeType: string) {
 }
 
 async function getPreferredResultUrl(sessionId: string) {
-  const worldJobs = await listWorldJobs(sessionId);
-  const videoJobs = await listVideoJobs(sessionId);
-  const latestWorldJob = worldJobs[0] ?? null;
-  const latestVideoJob = videoJobs[0] ?? null;
+  const worldJobs = await listLocalWorldJobs(sessionId);
+  const videoJobs = await listLocalVideoJobs(sessionId);
+  const websiteJobs = await listLocalWebsiteJobs(sessionId);
+  const latestJobTarget = [
+    worldJobs[0] ? { createdAt: worldJobs[0].createdAt, href: `/sessions/${sessionId}/worlds/${worldJobs[0].id}` } : null,
+    videoJobs[0] ? { createdAt: videoJobs[0].createdAt, href: `/sessions/${sessionId}/videos/${videoJobs[0].id}` } : null,
+    websiteJobs[0]
+      ? { createdAt: websiteJobs[0].createdAt, href: `/sessions/${sessionId}/websites/${websiteJobs[0].id}` }
+      : null
+  ]
+    .filter((value): value is { createdAt: string; href: string } => Boolean(value))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
 
-  if (latestWorldJob && latestVideoJob) {
-    return new Date(latestWorldJob.createdAt).getTime() >= new Date(latestVideoJob.createdAt).getTime()
-      ? `/sessions/${sessionId}/worlds/${latestWorldJob.id}`
-      : `/sessions/${sessionId}/videos/${latestVideoJob.id}`;
-  }
-
-  if (latestWorldJob) {
-    return `/sessions/${sessionId}/worlds/${latestWorldJob.id}`;
-  }
-
-  if (latestVideoJob) {
-    return `/sessions/${sessionId}/videos/${latestVideoJob.id}`;
+  if (latestJobTarget) {
+    return latestJobTarget.href;
   }
 
   try {
@@ -234,14 +269,57 @@ async function getPreferredResultUrl(sessionId: string) {
   return `/sessions/${sessionId}`;
 }
 
+async function getLocalPreferredResultUrl(sessionId: string) {
+  const worldJobs = await listLocalWorldJobs(sessionId);
+  const videoJobs = await listLocalVideoJobs(sessionId);
+  const websiteJobs = await listLocalWebsiteJobs(sessionId);
+  const latestJobTarget = [
+    worldJobs[0] ? { createdAt: worldJobs[0].createdAt, href: `/sessions/${sessionId}/worlds/${worldJobs[0].id}` } : null,
+    videoJobs[0] ? { createdAt: videoJobs[0].createdAt, href: `/sessions/${sessionId}/videos/${videoJobs[0].id}` } : null,
+    websiteJobs[0]
+      ? { createdAt: websiteJobs[0].createdAt, href: `/sessions/${sessionId}/websites/${websiteJobs[0].id}` }
+      : null
+  ]
+    .filter((value): value is { createdAt: string; href: string } => Boolean(value))
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())[0];
+
+  if (latestJobTarget) {
+    return latestJobTarget.href;
+  }
+
+  try {
+    const files = await readdir(getSessionDir(sessionId));
+    const hasGeneratedImage =
+      files.includes("generated-image-labeled.png") ||
+      files.includes("generated-image-plain.png") ||
+      files.includes("generated-image.png");
+    if (hasGeneratedImage) {
+      return `/sessions/${sessionId}/image`;
+    }
+  } catch {
+    return `/sessions/${sessionId}`;
+  }
+
+  return `/sessions/${sessionId}`;
+}
+
 export async function createSession(
   title?: string,
   options?: {
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
     imageGenerationProfile?: ImageGenerationProfile;
-  }
+  },
+  userId?: string
 ) {
+  if (hasSupabaseAdminConfig()) {
+    if (!userId) {
+      throw new Error("Authenticated user is required before creating a session.");
+    }
+
+    return createSupabaseSession(userId, title, options);
+  }
+
   const id = randomUUID();
   const createdAt = new Date().toISOString();
   const summary: SessionSummary = {
@@ -266,7 +344,15 @@ export async function createSession(
   return summary;
 }
 
-export async function listRecentSessions() {
+export async function listRecentSessions(userId?: string) {
+  if (hasSupabaseAdminConfig()) {
+    if (!userId) {
+      return [];
+    }
+
+    return listSupabaseRecentSessions(userId);
+  }
+
   const summaries = await readIndex();
   return Promise.all(
     summaries.map(async (summary) => ({
@@ -274,6 +360,50 @@ export async function listRecentSessions() {
       preferredResultUrl: await getPreferredResultUrl(summary.id)
     }))
   );
+}
+
+export async function listLocalRecentSessions() {
+  const summaries = await readIndex();
+  return Promise.all(
+    summaries.map(async (summary) => ({
+      ...summary,
+      preferredResultUrl: await getLocalPreferredResultUrl(summary.id)
+    }))
+  );
+}
+
+export async function listGallerySessions(userId?: string) {
+  if (!hasSupabaseAdminConfig()) {
+    return listRecentSessions(userId);
+  }
+
+  const localSessions = await listLocalRecentSessions();
+  if (!userId) {
+    return localSessions;
+  }
+
+  const cloudSessions = await listSupabaseRecentSessions(userId);
+  return mergeRecentSummaries([...cloudSessions, ...localSessions]);
+}
+
+export async function deleteSession(sessionId: string, userId?: string) {
+  if (hasSupabaseAdminConfig()) {
+    if (!userId) {
+      throw new Error("Authenticated user is required before deleting a session.");
+    }
+
+    await deleteSupabaseSession(sessionId, userId);
+    return;
+  }
+
+  const current = await readIndex();
+  const existing = current.find((summary) => summary.id === sessionId);
+  if (!existing) {
+    return;
+  }
+
+  await rm(getSessionDir(sessionId), { recursive: true, force: true });
+  await writeIndex(current.filter((summary) => summary.id !== sessionId));
 }
 
 export async function updateSessionPreferences(
@@ -284,6 +414,10 @@ export async function updateSessionPreferences(
     imageGenerationProfile?: ImageGenerationProfile;
   }
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return updateSupabaseSessionPreferences(sessionId, preferences);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -304,6 +438,10 @@ export async function updateSessionPreferences(
 }
 
 export async function saveSessionUpload(sessionId: string, payload: UploadPayload) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseSessionUpload(sessionId, payload);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -335,6 +473,10 @@ export async function saveSessionUpload(sessionId: string, payload: UploadPayloa
 }
 
 export async function markSessionProcessing(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return markSupabaseSessionProcessing(sessionId);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -351,6 +493,10 @@ export async function markSessionProcessing(sessionId: string) {
 }
 
 export async function saveSessionTranscript(sessionId: string, tokens: TranscriptToken[], approximate: boolean) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseSessionTranscript(sessionId, tokens, approximate);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -370,6 +516,10 @@ export async function saveSessionTranscript(sessionId: string, tokens: Transcrip
 }
 
 export async function saveSessionAnalysis(sessionId: string, analysis: SceneAnalysis) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseSessionAnalysis(sessionId, analysis);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -388,6 +538,10 @@ export async function saveSessionAnalysis(sessionId: string, analysis: SceneAnal
 }
 
 export async function saveSessionVideoSourcePlan(sessionId: string, plan: VideoSourcePlan) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseSessionVideoSourcePlan(sessionId, plan);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -406,6 +560,10 @@ export async function saveSessionVideoSourcePlan(sessionId: string, plan: VideoS
 }
 
 export async function saveSessionAsset(sessionId: string, assetKind: AssetKind, buffer: Buffer) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseSessionAsset(sessionId, assetKind, buffer);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -425,6 +583,10 @@ export async function saveSessionAsset(sessionId: string, assetKind: AssetKind, 
 }
 
 export async function markSessionFailed(sessionId: string, error: string) {
+  if (hasSupabaseAdminConfig()) {
+    return markSupabaseSessionFailed(sessionId, error);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     throw new Error("Session not found");
@@ -441,7 +603,11 @@ export async function markSessionFailed(sessionId: string, error: string) {
   return nextSummary;
 }
 
-export async function getSessionDetail(sessionId: string): Promise<SessionDetail | null> {
+export async function getSessionDetail(sessionId: string, userId?: string): Promise<SessionDetail | null> {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseSessionDetail(sessionId, userId);
+  }
+
   const summary = await readMeta(sessionId);
   if (!summary) {
     return null;
@@ -450,8 +616,9 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
   const events = await readJsonFile<DrawingEvent[]>(getEventsPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
-  const worldJobs = await listWorldJobs(sessionId);
-  const videoJobs = await listVideoJobs(sessionId);
+  const worldJobs = await listLocalWorldJobs(sessionId);
+  const videoJobs = await listLocalVideoJobs(sessionId);
+  const websiteJobs = await listLocalWebsiteJobs(sessionId);
 
   const sessionDir = getSessionDir(sessionId);
   const files = await readdir(sessionDir);
@@ -493,11 +660,115 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
       : null,
     analysis,
     worldJobs,
-    videoJobs
+    videoJobs,
+    websiteJobs
+  };
+}
+
+export async function getReadableSessionDetail(sessionId: string, userId?: string): Promise<SessionDetail | null> {
+  if (!hasSupabaseAdminConfig()) {
+    return getSessionDetail(sessionId, userId);
+  }
+
+  if (userId) {
+    const cloudSession = await getSupabaseSessionDetail(sessionId, userId);
+    if (cloudSession) {
+      return cloudSession;
+    }
+  }
+
+  const summary = await readMeta(sessionId);
+  if (!summary) {
+    return null;
+  }
+
+  const events = await readJsonFile<DrawingEvent[]>(getEventsPath(sessionId), []);
+  const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
+  const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
+  const worldJobs = await listLocalWorldJobs(sessionId);
+  const videoJobs = await listLocalVideoJobs(sessionId);
+  const websiteJobs = await listLocalWebsiteJobs(sessionId);
+
+  const sessionDir = getSessionDir(sessionId);
+  const files = await readdir(sessionDir);
+  const audioFile = files.find((fileName) => fileName.startsWith("audio."));
+  const sketchExists = files.includes("sketch.png");
+  const annotatedSketchExists = files.includes("annotated-sketch.png");
+  const videoAnnotatedSketchExists = files.includes("video-annotated-sketch.png");
+  const generatedImageLabeledExists = files.includes("generated-image-labeled.png");
+  const generatedImagePlainExists = files.includes("generated-image-plain.png");
+  const generatedVideoSourceImageExists = files.includes("generated-video-source-image.png");
+  const generatedImageExists = files.includes("generated-image.png");
+  const generatedImageUrl = generatedImageLabeledExists
+    ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
+    : generatedImageExists
+      ? `/api/sessions/${sessionId}/assets/generatedImage`
+      : null;
+
+  return {
+    ...summary,
+    events,
+    transcript,
+    audioUrl: audioFile ? `/api/sessions/${sessionId}/audio` : null,
+    sketchUrl: sketchExists ? `/api/sessions/${sessionId}/assets/sketch` : null,
+    annotatedSketchUrl: annotatedSketchExists
+      ? `/api/sessions/${sessionId}/assets/annotatedSketch`
+      : null,
+    videoAnnotatedSketchUrl: videoAnnotatedSketchExists
+      ? `/api/sessions/${sessionId}/assets/videoAnnotatedSketch`
+      : null,
+    generatedImageUrl,
+    generatedImageLabeledUrl: generatedImageLabeledExists
+      ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
+      : generatedImageUrl,
+    generatedImagePlainUrl: generatedImagePlainExists
+      ? `/api/sessions/${sessionId}/assets/generatedImagePlain`
+      : null,
+    generatedVideoSourceImageUrl: generatedVideoSourceImageExists
+      ? `/api/sessions/${sessionId}/assets/generatedVideoSourceImage`
+      : null,
+    analysis,
+    worldJobs,
+    videoJobs,
+    websiteJobs
   };
 }
 
 export async function getSessionAudio(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseSessionAudio(sessionId);
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const files = await readdir(sessionDir);
+  const audioFile = files.find((fileName) => fileName.startsWith("audio."));
+  if (!audioFile) {
+    return null;
+  }
+
+  const audioPath = path.join(sessionDir, audioFile);
+  const buffer = await readFile(audioPath);
+  const summary = await readMeta(sessionId);
+
+  return {
+    buffer,
+    fileName: audioFile,
+    mimeType: summary?.audioMimeType || "application/octet-stream"
+  };
+}
+
+export async function getReadableSessionAudio(sessionId: string, userId?: string) {
+  if (!hasSupabaseAdminConfig()) {
+    return getSessionAudio(sessionId);
+  }
+
+  if (userId) {
+    const cloudAudio = await getSupabaseSessionAudio(sessionId);
+    if (cloudAudio) {
+      return cloudAudio;
+    }
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const files = await readdir(sessionDir);
   const audioFile = files.find((fileName) => fileName.startsWith("audio."));
@@ -517,14 +788,52 @@ export async function getSessionAudio(sessionId: string) {
 }
 
 export async function getSessionAnalysis(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseSessionAnalysis(sessionId);
+  }
+
   return readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
 }
 
 export async function getSessionVideoSourcePlan(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseSessionVideoSourcePlan(sessionId);
+  }
+
   return readJsonFile<VideoSourcePlan | null>(getVideoSourcePlanPath(sessionId), null);
 }
 
 export async function getSessionAsset(sessionId: string, assetKind: AssetKind) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseSessionAsset(sessionId, assetKind);
+  }
+
+  const assetPath = getAssetPath(sessionId, assetKind);
+
+  try {
+    const buffer = await readFile(assetPath);
+    return {
+      buffer,
+      fileName: path.basename(assetPath),
+      mimeType: "image/png"
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getReadableSessionAsset(sessionId: string, assetKind: AssetKind, userId?: string) {
+  if (!hasSupabaseAdminConfig()) {
+    return getSessionAsset(sessionId, assetKind);
+  }
+
+  if (userId) {
+    const cloudAsset = await getSupabaseSessionAsset(sessionId, assetKind);
+    if (cloudAsset) {
+      return cloudAsset;
+    }
+  }
+
   const assetPath = getAssetPath(sessionId, assetKind);
 
   try {

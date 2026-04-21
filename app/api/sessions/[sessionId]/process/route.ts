@@ -1,3 +1,4 @@
+import { requireApiViewer } from "@/lib/auth-route";
 import {
   getSessionAudio,
   getSessionDetail,
@@ -13,7 +14,12 @@ export async function POST(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}`);
+  if (response) {
+    return response;
+  }
+
+  const session = await getSessionDetail(sessionId, viewer?.id);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }

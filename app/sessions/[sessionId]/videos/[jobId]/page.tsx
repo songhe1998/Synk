@@ -1,4 +1,5 @@
 import { VideoJobShell } from "@/components/video-job-shell";
+import { requireViewer } from "@/lib/auth";
 import { syncVideoGenerationJob } from "@/lib/video-pipeline";
 import { getSessionDetail } from "@/lib/session-store";
 import { getVideoJob } from "@/lib/video-store";
@@ -12,7 +13,8 @@ export default async function SessionVideoJobPage({
   params: Promise<{ sessionId: string; jobId: string }>;
 }) {
   const { sessionId, jobId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const viewer = await requireViewer(`/sessions/${sessionId}/videos/${jobId}`);
+  const session = await getSessionDetail(sessionId, viewer?.id);
   const existingJob = await getVideoJob(sessionId, jobId);
 
   if (!session || !existingJob) {

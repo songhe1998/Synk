@@ -2,6 +2,15 @@ import { randomUUID } from "crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "fs/promises";
 import path from "path";
 import { VideoJob } from "@/lib/types";
+import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
+import {
+  createSupabaseVideoJob,
+  getSupabaseVideoJob,
+  getSupabaseVideoJobAsset,
+  listSupabaseVideoJobs,
+  saveSupabaseVideoJobAsset,
+  updateSupabaseVideoJob
+} from "@/lib/supabase-video-store";
 
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 
@@ -57,6 +66,15 @@ async function readVideoJobs(sessionId: string) {
   }
 }
 
+export async function listLocalVideoJobs(sessionId: string) {
+  return readVideoJobs(sessionId);
+}
+
+export async function getLocalVideoJob(sessionId: string, jobId: string) {
+  const jobs = await readVideoJobs(sessionId);
+  return jobs.find((job) => job.id === jobId) ?? null;
+}
+
 async function writeVideoJobs(sessionId: string, jobs: VideoJob[]) {
   await mkdir(getSessionDir(sessionId), { recursive: true });
   const ordered = jobs
@@ -66,10 +84,18 @@ async function writeVideoJobs(sessionId: string, jobs: VideoJob[]) {
 }
 
 export async function listVideoJobs(sessionId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return listSupabaseVideoJobs(sessionId);
+  }
+
   return readVideoJobs(sessionId);
 }
 
 export async function getVideoJob(sessionId: string, jobId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseVideoJob(sessionId, jobId);
+  }
+
   const jobs = await readVideoJobs(sessionId);
   return jobs.find((job) => job.id === jobId) ?? null;
 }
@@ -78,6 +104,10 @@ export async function createVideoJob(
   sessionId: string,
   job: Omit<VideoJob, "id" | "sessionId" | "createdAt" | "updatedAt" | "sourceImageUrl" | "videoUrl">
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return createSupabaseVideoJob(sessionId, job);
+  }
+
   const now = new Date().toISOString();
   const nextJob = normalizeVideoJob(sessionId, {
     ...job,
@@ -100,6 +130,10 @@ export async function updateVideoJob(
   jobId: string,
   updater: (job: VideoJob) => VideoJob
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return updateSupabaseVideoJob(sessionId, jobId, updater);
+  }
+
   const jobs = await readVideoJobs(sessionId);
   const current = jobs.find((job) => job.id === jobId);
 
@@ -130,6 +164,14 @@ export async function saveVideoJobAsset(
     mimeType: string;
   }
 ) {
+  if (hasSupabaseAdminConfig()) {
+    return saveSupabaseVideoJobAsset(sessionId, jobId, {
+      buffer,
+      fileName,
+      mimeType
+    });
+  }
+
   await mkdir(getSessionDir(sessionId), { recursive: true });
   await writeFile(getVideoAssetPath(sessionId, jobId, fileName), buffer);
 
@@ -143,6 +185,10 @@ export async function saveVideoJobAsset(
 }
 
 export async function getVideoJobAsset(sessionId: string, jobId: string) {
+  if (hasSupabaseAdminConfig()) {
+    return getSupabaseVideoJobAsset(sessionId, jobId);
+  }
+
   const job = await getVideoJob(sessionId, jobId);
   if (!job?.videoFileName) {
     return null;

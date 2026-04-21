@@ -1,5 +1,8 @@
+import { requireApiViewer } from "@/lib/auth-route";
+import { getSessionDetail } from "@/lib/session-store";
 import { createImageExperience, refreshSessionDetail } from "@/lib/session-pipeline";
 import { startVideoGenerationJob } from "@/lib/video-pipeline";
+import { startWebsiteGenerationJob } from "@/lib/website-pipeline";
 import { startWorldGenerationJob } from "@/lib/world-pipeline";
 import {
   AnalysisReasoningEffort,
@@ -29,7 +32,7 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
 }
 
 function parseTarget(value: unknown) {
-  return value === "world" || value === "video" ? value : "image";
+  return value === "world" || value === "video" || value === "website" ? value : "image";
 }
 
 function parseVideoModelPreset(value: unknown): VideoModelPreset {
@@ -61,6 +64,15 @@ export async function POST(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}`);
+  if (response) {
+    return response;
+  }
+
+  if (!(await getSessionDetail(sessionId, viewer?.id))) {
+    return NextResponse.json({ error: "Session not found" }, { status: 404 });
+  }
+
   const body = await request.json().catch(() => ({}));
   const target = parseTarget(body?.target);
   const reasoningEffort = parseReasoningEffort(body?.reasoningEffort);
@@ -104,18 +116,26 @@ export async function POST(
             modelPreset: "hd",
             sourceAssetKind: "generatedImageLabeled"
           })
-        : await startVideoGenerationJob({
-            sessionId,
-            modelPreset: videoModelPreset,
-            pipelineMode: videoPipelineMode
-          });
+        : target === "website"
+          ? await startWebsiteGenerationJob({
+              sessionId
+            })
+          : await startVideoGenerationJob({
+              sessionId,
+              modelPreset: videoModelPreset,
+              pipelineMode: videoPipelineMode
+            });
 
     if (job.status === "failed") {
       return NextResponse.json(
         {
           error:
             job.errorMessage ??
-            (target === "world" ? "Failed to start 3D world generation." : "Failed to start video generation."),
+            (target === "world"
+              ? "Failed to start 3D world generation."
+              : target === "website"
+                ? "Failed to start website generation."
+                : "Failed to start video generation."),
           job
         },
         { status: 500 }

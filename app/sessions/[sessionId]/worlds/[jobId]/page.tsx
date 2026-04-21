@@ -1,4 +1,5 @@
 import { WorldJobShell } from "@/components/world-job-shell";
+import { requireViewer } from "@/lib/auth";
 import { syncWorldGenerationJob } from "@/lib/world-pipeline";
 import { getSessionDetail } from "@/lib/session-store";
 import { getWorldJob } from "@/lib/world-store";
@@ -12,7 +13,8 @@ export default async function SessionWorldJobPage({
   params: Promise<{ sessionId: string; jobId: string }>;
 }) {
   const { sessionId, jobId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const viewer = await requireViewer(`/sessions/${sessionId}/worlds/${jobId}`);
+  const session = await getSessionDetail(sessionId, viewer?.id);
   const existingJob = await getWorldJob(sessionId, jobId);
 
   if (!session || !existingJob) {

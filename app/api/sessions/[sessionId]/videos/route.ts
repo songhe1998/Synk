@@ -1,3 +1,4 @@
+import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
 import { startVideoGenerationJob } from "@/lib/video-pipeline";
 import { VideoModelPreset, VideoPipelineMode } from "@/lib/types";
@@ -31,7 +32,12 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}`);
+  if (response) {
+    return response;
+  }
+
+  const session = await getSessionDetail(sessionId, viewer?.id);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
@@ -44,7 +50,12 @@ export async function POST(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}`);
+  if (response) {
+    return response;
+  }
+
+  const session = await getSessionDetail(sessionId, viewer?.id);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }

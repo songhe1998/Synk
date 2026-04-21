@@ -1,3 +1,4 @@
+import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
 import { syncWorldGenerationJob } from "@/lib/world-pipeline";
 import { getWorldJob } from "@/lib/world-store";
@@ -10,7 +11,12 @@ export async function GET(
   { params }: { params: Promise<{ sessionId: string; jobId: string }> }
 ) {
   const { sessionId, jobId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const { viewer, response } = await requireApiViewer(`/sessions/${sessionId}/worlds/${jobId}`);
+  if (response) {
+    return response;
+  }
+
+  const session = await getSessionDetail(sessionId, viewer?.id);
   if (!session) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }

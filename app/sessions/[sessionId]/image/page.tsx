@@ -1,5 +1,6 @@
 import { ImageExperienceShell } from "@/components/image-experience-shell";
-import { getSessionDetail } from "@/lib/session-store";
+import { getOptionalViewer, isAuthEnabled, requireViewer } from "@/lib/auth";
+import { getReadableSessionDetail } from "@/lib/session-store";
 import { notFound } from "next/navigation";
 
 export const dynamic = "force-dynamic";
@@ -10,9 +11,13 @@ export default async function SessionImagePage({
   params: Promise<{ sessionId: string }>;
 }) {
   const { sessionId } = await params;
-  const session = await getSessionDetail(sessionId);
+  const viewer = await getOptionalViewer();
+  const session = await getReadableSessionDetail(sessionId, viewer?.id);
 
   if (!session) {
+    if (isAuthEnabled() && !viewer) {
+      await requireViewer(`/sessions/${sessionId}/image`);
+    }
     notFound();
   }
 

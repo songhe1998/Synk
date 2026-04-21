@@ -22,7 +22,7 @@ const FAST_SCENE_MODEL = process.env.OPENAI_FAST_SCENE_MODEL ?? "gpt-5.4-mini";
 const IMAGE_ORCHESTRATOR_MODEL = process.env.OPENAI_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4";
 const FAST_IMAGE_ORCHESTRATOR_MODEL =
   process.env.OPENAI_FAST_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4-mini";
-const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-1.5";
+const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-2";
 const FAST_IMAGE_TOOL_MODEL = process.env.OPENAI_FAST_IMAGE_TOOL_MODEL ?? "gpt-image-1-mini";
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const SKETCH_BACKGROUND = "#fff8e6";
@@ -255,6 +255,10 @@ function resolveImageToolSize(width: number, height: number, preset: ImageSizePr
 
 function resolveFastImageSize() {
   return "1024x1024";
+}
+
+function supportsInputFidelity(model: string) {
+  return !model.startsWith("gpt-image-2");
 }
 
 function buildImageSourceInstruction(
@@ -787,6 +791,7 @@ export async function generateImageFromSketch({
   imageSizePreset: ImageSizePreset;
   profile?: ImageGenerationProfile;
 }) {
+  const imageToolModel = profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL;
   const sourceInstruction = buildImageSourceInstruction(source, profile);
   const imageToolSize =
     profile === "fast" ? resolveFastImageSize() : resolveImageToolSize(width, height, imageSizePreset);
@@ -827,11 +832,15 @@ export async function generateImageFromSketch({
       tools: [
         {
           type: "image_generation",
-          model: profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL,
+          model: imageToolModel,
           action: "edit",
           size: imageToolSize,
           quality: profile === "fast" ? "low" : "medium",
-          input_fidelity: profile === "fast" ? "low" : "high"
+          ...(supportsInputFidelity(imageToolModel)
+            ? {
+                input_fidelity: profile === "fast" ? "low" : "high"
+              }
+            : {})
         }
       ],
       tool_choice: {

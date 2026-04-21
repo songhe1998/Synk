@@ -1,4 +1,6 @@
+import { requireApiViewer } from "@/lib/auth-route";
 import { createSession } from "@/lib/session-store";
+import { normalizeSupabaseError } from "@/lib/supabase/errors";
 import { AnalysisReasoningEffort, ImageGenerationProfile, ImageSizePreset } from "@/lib/types";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -21,11 +23,26 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
 }
 
 export async function POST(request: NextRequest) {
+  const { viewer, response } = await requireApiViewer("/");
+  if (response) {
+    return response;
+  }
+
   const payload = await request.json().catch(() => ({}));
-  const session = await createSession(typeof payload?.title === "string" ? payload.title : undefined, {
-    analysisReasoningEffort: parseReasoningEffort(payload?.analysisReasoningEffort),
-    imageSizePreset: parseImageSizePreset(payload?.imageSizePreset),
-    imageGenerationProfile: parseImageGenerationProfile(payload?.imageGenerationProfile)
-  });
-  return NextResponse.json(session);
+
+  try {
+    const session = await createSession(
+      typeof payload?.title === "string" ? payload.title : undefined,
+      {
+        analysisReasoningEffort: parseReasoningEffort(payload?.analysisReasoningEffort),
+        imageSizePreset: parseImageSizePreset(payload?.imageSizePreset),
+        imageGenerationProfile: parseImageGenerationProfile(payload?.imageGenerationProfile)
+      },
+      viewer?.id
+    );
+    return NextResponse.json(session);
+  } catch (error) {
+    const nextError = normalizeSupabaseError(error);
+    return NextResponse.json({ error: nextError.message }, { status: 503 });
+  }
 }

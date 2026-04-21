@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { after, before, test } from "node:test";
+
+let dataRoot = "";
+let sessionStore: typeof import("../lib/session-store");
+
+before(async () => {
+  dataRoot = await mkdtemp(path.join(os.tmpdir(), "synk-session-store-"));
+  process.env.SESSION_DATA_ROOT = dataRoot;
+  delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+  delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+  delete process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  sessionStore = await import("../lib/session-store");
+});
+
+after(async () => {
+  if (dataRoot) {
+    await rm(dataRoot, { recursive: true, force: true });
+  }
+});
+
+test("deleteSession removes a finalized local session from disk and recent index", async () => {
+  const session = await sessionStore.createSession("Always-on voice");
+
+  await sessionStore.saveSessionUpload(session.id, {
+    audioBuffer: Buffer.from("fake-webm-audio"),
+    audioMimeType: "audio/webm",
+    audioExtension: "webm",
+    events: [
+      {
+        type: "stroke_begin",
+        strokeId: "stroke-1",
+        tool: "pen",
+        color: "#20222b",
+        width: 6,
+        x: 16,
+        y: 24,
+        pressure: 0.5,
+        tMs: 0
+      },
+      {
+        type: "stroke_end",
+        strokeId: "stroke-1",
+        x: 48,
+        y: 72,
+        pressure: 0.5,
+        tMs: 240
+      }
+    ],
+    canvasWidth: 1280,
+    canvasHeight: 720,
+    durationMs: 240,
+    sketchBuffer: Buffer.from("fake-png")
+  });
+
+  await sessionStore.saveSessionTranscript(
+    session.id,
+    [
+      {
+        id: "token-1",
+        text: "hello",
+        startMs: 0,
+        endMs: 120,
+        granularity: "word",
+        lang: "latin",
+        approximate: false
+      }
+    ],
+    false
+  );
+
+  assert.ok(await sessionStore.getSessionDetail(session.id));
+  await stat(path.join(dataRoot, session.id));
+
+  await sessionStore.deleteSession(session.id);
+
+  assert.equal(await sessionStore.getSessionDetail(session.id), null);
+  const recent = await sessionStore.listRecentSessions();
+  assert.equal(recent.some((item) => item.id === session.id), false);
+  await assert.rejects(stat(path.join(dataRoot, session.id)));
+});
+
+test("deleteSession is a no-op for unknown local sessions", async () => {
+  await assert.doesNotReject(sessionStore.deleteSession("missing-session-id"));
+});
+
+test("deleteSession only removes the targeted session", async () => {
+  const first = await sessionStore.createSession("Session A");
+  const second = await sessionStore.createSession("Session B");
+
+  await sessionStore.deleteSession(first.id);
+
+  assert.equal(await sessionStore.getSessionDetail(first.id), null);
+  assert.ok(await sessionStore.getSessionDetail(second.id));
+
+  await sessionStore.deleteSession(second.id);
+});

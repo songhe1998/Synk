@@ -27,6 +27,11 @@ export type VideoSourceAssetKind =
   | "generatedVideoSourceImage";
 export type VideoResolution = "480p" | "720p" | "1080p";
 export type VideoAspectRatio = "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
+export type WebsiteJobStatus = "queued" | "running" | "building" | "exporting" | "succeeded" | "failed";
+export type WebsiteFramework = "vite-react";
+export type WebsiteSandboxProvider = "vercel";
+export type WebsiteArtifactKind = "previewImage" | "codeArchive" | "distArchive";
+export type WebsiteSourceAssetKind = "annotatedSketch";
 
 export type DrawingEvent =
   | {
@@ -212,6 +217,7 @@ export interface SessionDetail extends SessionSummary {
   analysis: SceneAnalysis | null;
   worldJobs: WorldJob[];
   videoJobs: VideoJob[];
+  websiteJobs: WebsiteJob[];
 }
 
 export interface TranscriptNormalizationResult {
@@ -288,4 +294,40 @@ export interface VideoJob {
   videoUrl: string | null;
   errorMessage: string | null;
   statusDetail: string | null;
+}
+
+export interface WebsitePageInput {
+  id: string;
+  title: string | null;
+  path: string;
+  sourceAssetKind: WebsiteSourceAssetKind;
+  sketchUrl: string | null;
+}
+
+export interface WebsiteJob {
+  id: string;
+  sessionId: string;
+  status: WebsiteJobStatus;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+  displayName: string;
+  framework: WebsiteFramework;
+  sandboxProvider: WebsiteSandboxProvider;
+  sandboxId: string | null;
+  transcriptText: string;
+  pages: WebsitePageInput[];
+  prompt: string;
+  statusDetail: string | null;
+  errorMessage: string | null;
+  previewImageUrl: string | null;
+  codeArchiveUrl: string | null;
+  distArchiveUrl: string | null;
+  previewUrl: string | null;
+  previewImageFileName: string | null;
+  previewImageMimeType: string | null;
+  codeArchiveFileName: string | null;
+  codeArchiveMimeType: string | null;
+  distArchiveFileName: string | null;
+  distArchiveMimeType: string | null;
 }

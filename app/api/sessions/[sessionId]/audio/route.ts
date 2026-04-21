@@ -1,11 +1,18 @@
-import { getSessionAudio } from "@/lib/session-store";
+import { getOptionalViewer } from "@/lib/auth";
+import { getReadableSessionAudio, getReadableSessionDetail } from "@/lib/session-store";
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
-  const audio = await getSessionAudio(sessionId);
+  const viewer = await getOptionalViewer();
+
+  if (!(await getReadableSessionDetail(sessionId, viewer?.id))) {
+    return new Response("Session not found", { status: 404 });
+  }
+
+  const audio = await getReadableSessionAudio(sessionId, viewer?.id);
   if (!audio) {
     return new Response("Audio not found", { status: 404 });
   }
