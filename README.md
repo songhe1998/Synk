@@ -53,7 +53,7 @@ npm run start
 
 - `OPENAI_API_KEY`
 - `OPENAI_TRANSCRIBE_MODEL`
-  Default: `whisper-1`
+  Default: `gpt-4o-mini-transcribe`
 - `OPENAI_SCENE_MODEL`
   Default: `gpt-5.4`
 - `OPENAI_VIDEO_SOURCE_PLAN_MODEL`
@@ -103,7 +103,7 @@ Important:
 - This is a demo, not a production system.
 - Voice capture is scoped to the active canvas. If the page becomes hidden before you press `Go`, the microphone stops immediately and the unfinished draft session is discarded.
 - Chinese token timing is approximated when the transcription API does not return true character-level timestamps.
-- If you override the model to `gpt-4o-mini-transcribe` or `gpt-4o-transcribe`, the app will retry with `whisper-1` for timestamped replay data because those models may reject `verbose_json`.
+- The default transcription model is `gpt-4o-mini-transcribe`. If the chosen model rejects `verbose_json` word timestamps, the app retries with `whisper-1` to preserve timestamped replay data before falling back to approximate timing.
 - Scene analysis is whole-transcript based. It does not do sentence-by-sentence grounding; instead it asks `gpt-5.4` for final objects plus verbatim evidence quotes, then maps those quotes back to timeline moments and nearby stroke clusters.
 - The annotated sketch is only guidance for image generation. Labels and callout lines are intentionally excluded from the final rendered image prompt.
 - Recent sessions are capped at 8 and older ones are pruned automatically.

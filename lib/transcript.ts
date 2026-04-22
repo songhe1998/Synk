@@ -8,7 +8,7 @@ interface RawToken {
 }
 
 const DEFAULT_TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
-const TIMESTAMP_FALLBACK_MODEL = "gpt-4o-mini-transcribe";
+const TIMESTAMP_FALLBACK_MODEL = "whisper-1";
 const TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions";
 export const TRANSCRIPTION_PROMPT =
   "This audio may include Chinese, English, and mixed technical terms. Preserve original wording.";
