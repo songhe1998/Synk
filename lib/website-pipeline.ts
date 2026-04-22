@@ -1259,7 +1259,10 @@ function isRetryableWebsiteGenerationError(message: string) {
     lower.includes("stream disconnected before completion") ||
     lower.includes("stream ended before command finished") ||
     lower.includes("websocket closed by server") ||
-    lower.includes("falling back from websockets to https transport")
+    lower.includes("falling back from websockets to https transport") ||
+    lower.includes("terminated") ||
+    lower.includes("killed") ||
+    lower.includes("signal")
   );
 }
 

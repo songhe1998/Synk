@@ -28,7 +28,10 @@ const PLANNER_DIR = `${SANDBOX_ROOT}/planner`;
 const PLANNER_PROMPT_PATH = `${PLANNER_DIR}/prompt.txt`;
 const PLANNER_SCHEMA_PATH = `${PLANNER_DIR}/schema.json`;
 const PLANNER_OUTPUT_PATH = `${PLANNER_DIR}/plan.json`;
+const PLANNER_LOG_PATH = `${PLANNER_DIR}/planner.log`;
 const REPAIR_PROMPT_PATH = `${INPUT_DIR}/repair.txt`;
+const CODEX_GENERATION_LOG_PATH = `${ARTIFACTS_DIR}/codex-generation.log`;
+const CODEX_REPAIR_LOG_PATH = `${ARTIFACTS_DIR}/codex-repair.log`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
 const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
@@ -383,14 +386,13 @@ function shellEscape(value: string) {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
-function buildCodexShellCommand(promptPath: string, imagePaths: string[] = []) {
+function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], logPath?: string) {
   const imageArgs = imagePaths
     .map((imagePath) => `-i ${shellEscape(imagePath)}`)
     .join(" ");
   const commonArgs = [
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
-    "--json",
     "-C",
     shellEscape(PROJECT_DIR),
     imageArgs,
@@ -398,17 +400,20 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = []) {
   ]
     .filter(Boolean)
     .join(" ");
+  const pipedCommand = logPath
+    ? `set -o pipefail; cat ${shellEscape(promptPath)} | COMMAND_PLACEHOLDER 2>&1 | tee ${shellEscape(logPath)}`
+    : `cat ${shellEscape(promptPath)} | COMMAND_PLACEHOLDER`;
 
   return [
     `if [ -x ${shellEscape(CODEX_BIN_PATH)} ]; then`,
-    `cat ${shellEscape(promptPath)} | ${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs};`,
+    `${pipedCommand.replace("COMMAND_PLACEHOLDER", `${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs}`)};`,
     "else",
-    `cat ${shellEscape(promptPath)} | npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs};`,
+    `${pipedCommand.replace("COMMAND_PLACEHOLDER", `npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs}`)};`,
     "fi"
   ].join(" ");
 }
 
-function buildCodexPlannerShellCommand(previewImagePath: string) {
+function buildCodexPlannerShellCommand(previewImagePath: string, logPath?: string) {
   const commonArgs = [
     "--skip-git-repo-check",
     "--ephemeral",
@@ -424,12 +429,15 @@ function buildCodexPlannerShellCommand(previewImagePath: string) {
     shellEscape(PLANNER_OUTPUT_PATH),
     "-"
   ].join(" ");
+  const pipedCommand = logPath
+    ? `set -o pipefail; cat ${shellEscape(PLANNER_PROMPT_PATH)} | COMMAND_PLACEHOLDER 2>&1 | tee ${shellEscape(logPath)}`
+    : `cat ${shellEscape(PLANNER_PROMPT_PATH)} | COMMAND_PLACEHOLDER`;
 
   return [
     `if [ -x ${shellEscape(CODEX_BIN_PATH)} ]; then`,
-    `cat ${shellEscape(PLANNER_PROMPT_PATH)} | ${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs};`,
+    `${pipedCommand.replace("COMMAND_PLACEHOLDER", `${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs}`)};`,
     "else",
-    `cat ${shellEscape(PLANNER_PROMPT_PATH)} | npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs};`,
+    `${pipedCommand.replace("COMMAND_PLACEHOLDER", `npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs}`)};`,
     "fi"
   ].join(" ");
 }
@@ -510,6 +518,29 @@ function buildRepairPrompt() {
     "Keep responsiveness, visible hierarchy, and button/input styling intact.",
     "Do not restart from scratch unless necessary. Leave the workspace ready for `npm run build`."
   ].join("\n");
+}
+
+async function readSandboxTextTail(sandbox: Sandbox, filePath: string, maxChars = 4000) {
+  const buffer = await sandbox.readFileToBuffer({ path: filePath }).catch(() => null);
+  if (!buffer) {
+    return null;
+  }
+
+  const text = buffer.toString("utf8").trim();
+  if (!text) {
+    return null;
+  }
+
+  return text.length > maxChars ? text.slice(-maxChars) : text;
+}
+
+function appendFailureContext(error: unknown, label: string, details: string | null) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!details) {
+    return new Error(message);
+  }
+
+  return new Error(`${message}\n\n${label}:\n${details}`);
 }
 
 export async function runWebsiteSandboxJob({
@@ -593,10 +624,13 @@ export async function runWebsiteSandboxJob({
         buildCodexShellCommand(`${INPUT_DIR}/prompt.txt`, [
           ...referenceImages.map((image) => `${INPUT_DIR}/${image.fileName}`),
           ...sketchImagePaths
-        ])
+        ], CODEX_GENERATION_LOG_PATH)
       ],
       env: buildRunEnvironment(),
       label: "Codex website generation"
+    }).catch(async (error) => {
+      const details = await readSandboxTextTail(sandbox, CODEX_GENERATION_LOG_PATH);
+      throw appendFailureContext(error, "Codex generation log tail", details);
     });
 
     await sandbox.fs.rm(CODEX_HOME_ROOT, {
@@ -667,10 +701,13 @@ export async function runWebsiteSandboxJob({
 
       await runSandboxCommand(sandbox, {
         cmd: "bash",
-        args: ["-lc", buildCodexShellCommand(REPAIR_PROMPT_PATH)],
+        args: ["-lc", buildCodexShellCommand(REPAIR_PROMPT_PATH, [], CODEX_REPAIR_LOG_PATH)],
         cwd: PROJECT_DIR,
         env: buildRunEnvironment(),
         label: "Codex website repair"
+      }).catch(async (error) => {
+        const details = await readSandboxTextTail(sandbox, CODEX_REPAIR_LOG_PATH);
+        throw appendFailureContext(error, "Codex repair log tail", details);
       });
 
       await sandbox.fs.rm(CODEX_HOME_ROOT, {
@@ -797,9 +834,12 @@ export async function runWebsiteAssetPlanner(params: {
 
     await runSandboxCommand(sandbox, {
       cmd: "bash",
-      args: ["-lc", buildCodexPlannerShellCommand(`${PLANNER_DIR}/target-preview.png`)],
+      args: ["-lc", buildCodexPlannerShellCommand(`${PLANNER_DIR}/target-preview.png`, PLANNER_LOG_PATH)],
       env: buildRunEnvironment(),
       label: "Codex website asset planner"
+    }).catch(async (error) => {
+      const details = await readSandboxTextTail(sandbox, PLANNER_LOG_PATH);
+      throw appendFailureContext(error, "Codex planner log tail", details);
     });
 
     const outputBuffer = await sandbox.readFileToBuffer({

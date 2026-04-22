@@ -41,6 +41,14 @@ import {
 const DEFAULT_VIDEO_DURATION_SECONDS = 5;
 const DEFAULT_VIDEO_RESOLUTION: VideoResolution = "720p";
 const DEFAULT_VIDEO_CAMERA_FIXED = false;
+const VIDEO_JOB_POLL_INTERVAL_MS = 10_000;
+const VIDEO_JOB_MAX_POLLS = 180;
+
+const videoJobMonitors = new Map<string, Promise<VideoJob | null>>();
+
+function getVideoRunKey(sessionId: string, jobId: string) {
+  return `${sessionId}:${jobId}`;
+}
 
 function getOpenAiKey() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -222,6 +230,58 @@ async function finalizeVideoJobFromResult(sessionId: string, job: VideoJob) {
     errorMessage: null,
     statusDetail: "Video is ready."
   }));
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function monitorVideoJobUntilTerminal(sessionId: string, jobId: string) {
+  for (let poll = 0; poll < VIDEO_JOB_MAX_POLLS; poll += 1) {
+    const current = await getVideoJob(sessionId, jobId);
+    if (!current) {
+      return null;
+    }
+
+    if (current.status === "failed" || !current.requestId) {
+      return current;
+    }
+
+    if (current.status === "succeeded" && videoHasLocalAsset(current)) {
+      return current;
+    }
+
+    try {
+      const updated = await finalizeVideoJobFromResult(sessionId, current);
+      if (updated.status === "failed") {
+        return updated;
+      }
+
+      if (updated.status === "succeeded" && videoHasLocalAsset(updated)) {
+        return updated;
+      }
+    } catch (error) {
+      console.warn(`[video-job-monitor] ${jobId} poll ${poll + 1} failed`, error);
+    }
+
+    await wait(VIDEO_JOB_POLL_INTERVAL_MS);
+  }
+
+  return getVideoJob(sessionId, jobId);
+}
+
+function queueVideoJobMonitor(sessionId: string, jobId: string) {
+  const runKey = getVideoRunKey(sessionId, jobId);
+  const existingRun = videoJobMonitors.get(runKey);
+  if (existingRun) {
+    return existingRun;
+  }
+
+  const run = monitorVideoJobUntilTerminal(sessionId, jobId).finally(() => {
+    videoJobMonitors.delete(runKey);
+  });
+  videoJobMonitors.set(runKey, run);
+  return run;
 }
 
 async function ensureSketchAsset(sessionId: string, session: Awaited<ReturnType<typeof getRequiredSession>>) {
@@ -480,7 +540,11 @@ export async function startVideoGenerationJob({
       statusDetail: "Video generation accepted by MuAPI."
     }));
 
-    return finalizeVideoJobFromResult(sessionId, updatedJob).catch(() => updatedJob);
+    const finalizedJob = await finalizeVideoJobFromResult(sessionId, updatedJob).catch(() => updatedJob);
+    if (!(finalizedJob.status === "succeeded" && videoHasLocalAsset(finalizedJob)) && finalizedJob.status !== "failed") {
+      void queueVideoJobMonitor(sessionId, job.id);
+    }
+    return finalizedJob;
   } catch (error) {
     return updateVideoJob(sessionId, job.id, (current) => ({
       ...current,
@@ -506,5 +570,9 @@ export async function syncVideoGenerationJob(sessionId: string, jobId: string) {
     return job;
   }
 
-  return finalizeVideoJobFromResult(sessionId, job);
+  const updated = await finalizeVideoJobFromResult(sessionId, job);
+  if (!(updated.status === "succeeded" && videoHasLocalAsset(updated)) && updated.status !== "failed") {
+    void queueVideoJobMonitor(sessionId, jobId);
+  }
+  return updated;
 }
