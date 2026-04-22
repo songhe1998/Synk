@@ -49,6 +49,8 @@ function getVideoAssetUrl(sessionId: string, jobId: string, fileName: string | n
 }
 
 function normalizeVideoJob(row: VideoJobRow): VideoJob {
+  const localVideoUrl =
+    row.video_storage_path && row.video_file_name ? getVideoAssetUrl(row.session_id, row.id, row.video_file_name) : null;
   return {
     id: row.id,
     sessionId: row.session_id,
@@ -76,7 +78,8 @@ function normalizeVideoJob(row: VideoJobRow): VideoJob {
     remoteVideoUrl: row.remote_video_url,
     videoFileName: row.video_file_name,
     videoMimeType: row.video_mime_type,
-    videoUrl: getVideoAssetUrl(row.session_id, row.id, row.video_file_name),
+    videoStoragePath: row.video_storage_path,
+    videoUrl: localVideoUrl ?? row.remote_video_url,
     errorMessage: row.error_message,
     statusDetail: row.status_detail
   };
@@ -109,7 +112,7 @@ function toVideoJobRow(sessionId: string, job: VideoJob, existingStoragePath: st
     remote_video_url: job.remoteVideoUrl,
     video_file_name: job.videoFileName,
     video_mime_type: job.videoMimeType,
-    video_storage_path: existingStoragePath,
+    video_storage_path: job.videoStoragePath ?? existingStoragePath,
     error_message: job.errorMessage,
     status_detail: job.statusDetail
   };

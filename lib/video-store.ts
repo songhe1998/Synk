@@ -49,8 +49,9 @@ function normalizeVideoJob(sessionId: string, job: VideoJob): VideoJob {
     sourceImagePrompt: job.sourceImagePrompt ?? null,
     sourceImagePromptModel: job.sourceImagePromptModel ?? null,
     promptModel: job.promptModel ?? null,
+    videoStoragePath: job.videoStoragePath ?? null,
     sourceImageUrl: job.sourceImageUrl ?? getSourceImageUrl(sessionId, job.sourceAssetKind),
-    videoUrl: getVideoAssetUrl(sessionId, job.id, job.videoFileName)
+    videoUrl: getVideoAssetUrl(sessionId, job.id, job.videoFileName) ?? job.remoteVideoUrl
   };
 }
 

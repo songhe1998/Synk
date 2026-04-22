@@ -291,6 +291,7 @@ export interface VideoJob {
   remoteVideoUrl: string | null;
   videoFileName: string | null;
   videoMimeType: string | null;
+  videoStoragePath?: string | null;
   videoUrl: string | null;
   errorMessage: string | null;
   statusDetail: string | null;

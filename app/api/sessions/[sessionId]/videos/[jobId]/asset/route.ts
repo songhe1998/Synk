@@ -1,6 +1,7 @@
 import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
-import { getVideoJobAsset } from "@/lib/video-store";
+import { getVideoJob, getVideoJobAsset } from "@/lib/video-store";
+import { NextResponse } from "next/server";
 
 export async function GET(
   request: Request,
@@ -16,8 +17,12 @@ export async function GET(
     return new Response("Session not found", { status: 404 });
   }
 
-  const asset = await getVideoJobAsset(sessionId, jobId);
+  const [job, asset] = await Promise.all([getVideoJob(sessionId, jobId), getVideoJobAsset(sessionId, jobId)]);
   if (!asset) {
+    if (job?.remoteVideoUrl) {
+      return NextResponse.redirect(job.remoteVideoUrl, { status: 307 });
+    }
+
     return new Response("Video not found", { status: 404 });
   }
 

@@ -1,12 +1,9 @@
-import os from "os";
-import http from "http";
 import path from "path";
 import { createHash } from "crypto";
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "fs/promises";
 import { Sandbox, Snapshot } from "@vercel/sandbox";
 import { WebsiteJob, WebsiteJobStatus } from "@/lib/types";
 import { getWebsitePreviewMimeType } from "@/lib/website-artifacts";
-import { findMetaCopyPatternMatches } from "@/lib/website-meta-copy";
 import { getSessionAsset } from "@/lib/session-store";
 import { readCodexAuthJson } from "@/lib/codex-auth";
 import {
@@ -32,26 +29,10 @@ const PLANNER_PROMPT_PATH = `${PLANNER_DIR}/prompt.txt`;
 const PLANNER_SCHEMA_PATH = `${PLANNER_DIR}/schema.json`;
 const PLANNER_OUTPUT_PATH = `${PLANNER_DIR}/plan.json`;
 const REPAIR_PROMPT_PATH = `${INPUT_DIR}/repair.txt`;
-const META_COPY_REPAIR_PROMPT_PATH = `${INPUT_DIR}/meta-copy-repair.txt`;
-const VISUAL_QA_PROMPT_PATH = `${INPUT_DIR}/visual-qa.txt`;
-const VISUAL_QA_SCREENSHOT_PATH = `${INPUT_DIR}/visual-qa-screenshot.png`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
+const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
 const SNAPSHOT_CACHE_PATH = path.join(process.cwd(), ".cache", "website-sandbox-snapshot.json");
-
-const CONTENT_TYPES: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2"
-};
 
 interface LocalTemplateFile {
   relativePath: string;
@@ -141,6 +122,7 @@ function getTemplateFiles() {
 async function computeTemplateSnapshotKey() {
   const files = await getTemplateFiles();
   const hash = createHash("sha256");
+  hash.update(SANDBOX_BASELINE_VERSION);
   hash.update(DEFAULT_CODEX_PACKAGE);
 
   for (const file of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath))) {
@@ -530,161 +512,6 @@ function buildRepairPrompt() {
   ].join("\n");
 }
 
-function buildMetaCopyRepairPrompt(matches: string[]) {
-  const findings = matches.map((match) => `- ${match}`).join("\n");
-  return [
-    "The built site contains visible meta or design-process copy that should never appear to end users.",
-    "Rewrite only the affected visible text so it reads like real user-facing website content.",
-    "Do not mention the request, prompt, preview, wireframe, composition, placeholders, fidelity, implementation choices, or why the design was built a certain way.",
-    "Preserve the overall structure, routes, styling direction, and intended meaning of the page.",
-    "Keep the repaired text concise, natural, and on-brand for the site instead of explanatory.",
-    "Detected suspicious phrases:",
-    findings,
-    "Leave the project ready for `npm run build`."
-  ].join("\n");
-}
-
-function isVisualQaEnabled() {
-  return process.env.WEBSITE_ENABLE_VISUAL_QA === "1";
-}
-
-function buildVisualQaPrompt(includeSketchInputs: boolean) {
-  const lines = [
-    "You are polishing an already built website after looking at its rendered screenshot.",
-    "The attached rendered screenshot shows the current page.",
-    includeSketchInputs
-      ? "The attached labeled sketch shows the intended wireframe structure."
-      : "The attached preview and supporting references define the intended structure and mood.",
-    "Improve the existing project in place. Do not restart from scratch.",
-    "Your job is to judge whether the current page needs clearer surfaces, panels, or containers to support typography and hierarchy.",
-    "If the page feels flimsy, under-structured, or typographically weak without visible containers, add back well-judged panels or framed sections.",
-    "If the page already has enough structure, keep it restrained and avoid adding boxes everywhere.",
-    "Pay special attention to typography: headline rhythm, paragraph measure, line-height, spacing between text blocks, and whether the text feels cramped or awkwardly stranded in empty space.",
-    "Do not introduce meta copy about the request, preview, composition, placeholders, fidelity, or implementation choices while polishing.",
-    includeSketchInputs
-      ? "The goal is not 'fewer boxes'; the goal is a page that looks good and matches the user's intent. Surface treatment should be decided from the actual screenshot and sketch, not from a fixed anti-card rule."
-      : "The goal is not 'fewer boxes'; the goal is a page that looks good and matches the preview and user's intent. Surface treatment should be decided from the actual screenshot and references, not from a fixed anti-card rule.",
-    "Keep the page structure recognizable and maintain responsiveness.",
-    "Leave the project ready for `npm run build`."
-  ];
-
-  return lines.join("\n");
-}
-
-async function writePreviewFilesToTempDir(
-  previewFiles: Array<{ assetPath: string; buffer: Buffer }>
-) {
-  const rootDir = await mkdtemp(path.join(os.tmpdir(), "synk-website-preview-"));
-
-  for (const file of previewFiles) {
-    const filePath = path.join(rootDir, file.assetPath);
-    const parentDir = path.dirname(filePath);
-    await mkdir(parentDir, { recursive: true });
-    await writeFile(filePath, file.buffer);
-  }
-
-  return rootDir;
-}
-
-async function startStaticPreviewServer(rootDir: string) {
-  const server = http.createServer(async (req, res) => {
-    try {
-      if (!req.url) {
-        res.writeHead(400);
-        res.end("Missing URL");
-        return;
-      }
-
-      const parsed = new URL(req.url, "http://127.0.0.1");
-      const relativePath = parsed.pathname === "/" ? "index.html" : parsed.pathname.slice(1);
-      const resolvedPath = path.join(rootDir, relativePath);
-
-      if (!resolvedPath.startsWith(rootDir)) {
-        res.writeHead(403);
-        res.end("Forbidden");
-        return;
-      }
-
-      const buffer = await readFile(resolvedPath);
-      const contentType = CONTENT_TYPES[path.extname(resolvedPath).toLowerCase()] ?? "application/octet-stream";
-      res.writeHead(200, { "Content-Type": contentType });
-      res.end(buffer);
-    } catch {
-      res.writeHead(404);
-      res.end("Not found");
-    }
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Unable to bind visual QA preview server.");
-  }
-
-  return {
-    server,
-    baseUrl: `http://127.0.0.1:${address.port}`
-  };
-}
-
-async function captureVisualQaScreenshot(
-  previewFiles: Array<{ assetPath: string; buffer: Buffer }>
-) {
-  const tempDir = await writePreviewFilesToTempDir(previewFiles);
-  const { server, baseUrl } = await startStaticPreviewServer(tempDir);
-  const { chromium } = await import("@playwright/test");
-  const browser = await chromium.launch({ headless: true });
-
-  try {
-    const page = await browser.newPage({
-      viewport: { width: 1440, height: 1180 },
-      deviceScaleFactor: 1.5
-    });
-    await page.goto(baseUrl, {
-      waitUntil: "networkidle",
-      timeout: 120000
-    });
-    return Buffer.from(await page.screenshot({ fullPage: true, type: "png" }));
-  } finally {
-    await browser.close().catch(() => undefined);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function extractRenderedPageText(
-  previewFiles: Array<{ assetPath: string; buffer: Buffer }>
-) {
-  const tempDir = await writePreviewFilesToTempDir(previewFiles);
-  const { server, baseUrl } = await startStaticPreviewServer(tempDir);
-  const { chromium } = await import("@playwright/test");
-  const browser = await chromium.launch({ headless: true });
-
-  try {
-    const page = await browser.newPage({
-      viewport: { width: 1440, height: 1180 },
-      deviceScaleFactor: 1.5
-    });
-    await page.goto(baseUrl, {
-      waitUntil: "networkidle",
-      timeout: 120000
-    });
-    const bodyText = await page.locator("body").innerText();
-    return bodyText;
-  } finally {
-    await browser.close().catch(() => undefined);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function findGeneratedMetaCopyMatches(
-  previewFiles: Array<{ assetPath: string; buffer: Buffer }>
-) {
-  const renderedText = await extractRenderedPageText(previewFiles);
-  return findMetaCopyPatternMatches(renderedText);
-}
-
 export async function runWebsiteSandboxJob({
   job,
   includeSketchInputs = true,
@@ -860,118 +687,6 @@ export async function runWebsiteSandboxJob({
       });
 
       await ensureStyledBuild(sandbox);
-    }
-
-    if (isVisualQaEnabled()) {
-      await onProgress?.({
-        status: "building",
-        statusDetail: "Capturing rendered page for visual QA and targeted polish.",
-        sandboxId: sandbox.sandboxId
-      });
-
-      const initialPreviewFiles = await readPreviewFiles(sandbox);
-      const qaScreenshotBuffer = await captureVisualQaScreenshot(
-        initialPreviewFiles.map((file) => ({
-          assetPath: file.assetPath,
-          buffer: file.buffer
-        }))
-      );
-      const authJson = await readCodexAuthJson();
-
-      await sandbox.writeFiles([
-        {
-          path: CODEX_AUTH_PATH,
-          content: Buffer.from(authJson, "utf8")
-        },
-        {
-          path: VISUAL_QA_PROMPT_PATH,
-          content: Buffer.from(buildVisualQaPrompt(includeSketchInputs), "utf8")
-        },
-        {
-          path: VISUAL_QA_SCREENSHOT_PATH,
-          content: qaScreenshotBuffer
-        }
-      ]);
-
-      await runSandboxCommand(sandbox, {
-        cmd: "bash",
-        args: [
-          "-lc",
-          buildCodexShellCommand(VISUAL_QA_PROMPT_PATH, [
-            VISUAL_QA_SCREENSHOT_PATH,
-            ...sketchImagePaths
-          ])
-        ],
-        cwd: PROJECT_DIR,
-        env: buildRunEnvironment(),
-        label: "Codex visual QA polish"
-      });
-
-      await sandbox.fs.rm(CODEX_HOME_ROOT, {
-        recursive: true,
-        force: true
-      });
-
-      await runSandboxCommand(sandbox, {
-        cmd: "npm",
-        args: ["run", "build"],
-        cwd: PROJECT_DIR,
-        env: buildRunEnvironment(),
-        label: "Building visual QA polish pass"
-      });
-
-      await ensureStyledBuild(sandbox);
-    }
-
-    let metaCopyMatches = await findGeneratedMetaCopyMatches(await readPreviewFiles(sandbox));
-    if (metaCopyMatches.length) {
-      await onProgress?.({
-        status: "building",
-        statusDetail: "Detected leaked design-process copy in the rendered site. Running a targeted content cleanup pass.",
-        sandboxId: sandbox.sandboxId
-      });
-
-      const authJson = await readCodexAuthJson();
-      await sandbox.writeFiles([
-        {
-          path: CODEX_AUTH_PATH,
-          content: Buffer.from(authJson, "utf8")
-        },
-        {
-          path: META_COPY_REPAIR_PROMPT_PATH,
-          content: Buffer.from(buildMetaCopyRepairPrompt(metaCopyMatches), "utf8")
-        }
-      ]);
-
-      await runSandboxCommand(sandbox, {
-        cmd: "bash",
-        args: ["-lc", buildCodexShellCommand(META_COPY_REPAIR_PROMPT_PATH)],
-        cwd: PROJECT_DIR,
-        env: buildRunEnvironment(),
-        label: "Codex meta-copy cleanup"
-      });
-
-      await sandbox.fs.rm(CODEX_HOME_ROOT, {
-        recursive: true,
-        force: true
-      });
-
-      await runSandboxCommand(sandbox, {
-        cmd: "npm",
-        args: ["run", "build"],
-        cwd: PROJECT_DIR,
-        env: buildRunEnvironment(),
-        label: "Building meta-copy cleanup pass"
-      });
-
-      await ensureStyledBuild(sandbox);
-
-      const residualMetaCopyMatches = await findGeneratedMetaCopyMatches(await readPreviewFiles(sandbox));
-      if (residualMetaCopyMatches.length) {
-        throw new Error(
-          `Generated site still contains visible meta design-process copy after cleanup: ${residualMetaCopyMatches.join(", ")}`
-        );
-      }
     }
 
     await onProgress?.({

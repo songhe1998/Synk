@@ -214,6 +214,7 @@ async function finalizeVideoJobFromResult(sessionId: string, job: VideoJob) {
   });
 
   return updateVideoJob(sessionId, job.id, (current) => ({
+    ...current,
     ...persisted,
     status: "succeeded",
     completedAt: new Date().toISOString(),
