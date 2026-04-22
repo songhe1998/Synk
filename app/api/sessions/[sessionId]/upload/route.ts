@@ -1,5 +1,5 @@
 import { requireApiViewer } from "@/lib/auth-route";
-import { getSessionDetail, saveSessionTranscript, saveSessionUpload } from "@/lib/session-store";
+import { getSessionDetail, markSessionFailed, saveSessionTranscript, saveSessionUpload } from "@/lib/session-store";
 import { DrawingEvent, TranscriptToken } from "@/lib/types";
 import { NextResponse } from "next/server";
 
@@ -47,21 +47,27 @@ export async function POST(
     typeof rawTranscript === "string" ? (JSON.parse(rawTranscript) as TranscriptToken[]) : null;
   const transcriptApproximate = String(rawTranscriptApproximate ?? "false") === "true";
 
-  const uploadedSession = await saveSessionUpload(sessionId, {
-    audioBuffer,
-    audioMimeType,
-    audioExtension: extension,
-    events,
-    canvasWidth,
-    canvasHeight,
-    durationMs: Number.isFinite(durationMs) ? durationMs : 0,
-    sketchBuffer
-  });
+  try {
+    const uploadedSession = await saveSessionUpload(sessionId, {
+      audioBuffer,
+      audioMimeType,
+      audioExtension: extension,
+      events,
+      canvasWidth,
+      canvasHeight,
+      durationMs: Number.isFinite(durationMs) ? durationMs : 0,
+      sketchBuffer
+    });
 
-  if (transcriptTokens) {
-    const finalizedSession = await saveSessionTranscript(sessionId, transcriptTokens, transcriptApproximate);
-    return NextResponse.json(finalizedSession);
+    if (transcriptTokens) {
+      const finalizedSession = await saveSessionTranscript(sessionId, transcriptTokens, transcriptApproximate);
+      return NextResponse.json(finalizedSession);
+    }
+
+    return NextResponse.json(uploadedSession);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to upload the session.";
+    await markSessionFailed(sessionId, `Session upload failed: ${message}`).catch(() => undefined);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  return NextResponse.json(uploadedSession);
 }

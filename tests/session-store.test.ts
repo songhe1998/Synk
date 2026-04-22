@@ -100,3 +100,46 @@ test("deleteSession only removes the targeted session", async () => {
 
   await sessionStore.deleteSession(second.id);
 });
+
+test("saveSessionUpload succeeds even when no sketch snapshot is present", async () => {
+  const session = await sessionStore.createSession("Audio only upload");
+
+  const uploaded = await sessionStore.saveSessionUpload(session.id, {
+    audioBuffer: Buffer.from("fake-webm-audio"),
+    audioMimeType: "audio/webm",
+    audioExtension: "webm",
+    events: [
+      {
+        type: "stroke_begin",
+        strokeId: "stroke-1",
+        tool: "pen",
+        color: "#20222b",
+        width: 6,
+        x: 12,
+        y: 18,
+        pressure: 0.5,
+        tMs: 0
+      },
+      {
+        type: "stroke_end",
+        strokeId: "stroke-1",
+        x: 90,
+        y: 120,
+        pressure: 0.5,
+        tMs: 320
+      }
+    ],
+    canvasWidth: 1280,
+    canvasHeight: 720,
+    durationMs: 320
+  });
+
+  assert.equal(uploaded.status, "uploaded");
+  assert.equal(uploaded.audioMimeType, "audio/webm");
+
+  const detail = await sessionStore.getSessionDetail(session.id);
+  assert.ok(detail);
+  assert.equal(detail?.status, "uploaded");
+  assert.equal(detail?.sketchUrl, null);
+  assert.equal(detail?.events.length, 2);
+});

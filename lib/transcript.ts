@@ -12,6 +12,85 @@ const TIMESTAMP_FALLBACK_MODEL = "whisper-1";
 const TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions";
 export const TRANSCRIPTION_PROMPT =
   "This audio may include Chinese, English, and mixed technical terms. Preserve original wording.";
+const PROMPT_ECHO_ERROR_CODE = "PROMPT_ECHO_TRANSCRIPT";
+
+function canonicalizeTranscriptText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fff]+/giu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const CANONICAL_TRANSCRIPTION_PROMPT = canonicalizeTranscriptText(TRANSCRIPTION_PROMPT);
+const CANONICAL_TRANSCRIPTION_PROMPT_WORDS = new Set(CANONICAL_TRANSCRIPTION_PROMPT.split(" "));
+
+function parseStructuredErrorMessage(error: unknown) {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+
+  try {
+    return JSON.parse(rawMessage) as {
+      code?: string;
+      model?: string;
+      responseFormat?: string;
+      includeWordTimestamps?: boolean;
+      message?: string;
+      rawText?: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildTranscriptText(tokens: TranscriptToken[]) {
+  return tokens
+    .map((token) => token.text.trim())
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+([,.;!?])/g, "$1")
+    .trim();
+}
+
+export function isPromptEchoTranscriptText(text: string) {
+  const canonical = canonicalizeTranscriptText(text);
+  if (!canonical) {
+    return false;
+  }
+
+  if (canonical === CANONICAL_TRANSCRIPTION_PROMPT) {
+    return true;
+  }
+
+  const doubledPrompt = `${CANONICAL_TRANSCRIPTION_PROMPT} ${CANONICAL_TRANSCRIPTION_PROMPT}`;
+  if (canonical.includes(doubledPrompt)) {
+    return true;
+  }
+
+  const words = canonical.split(" ").filter(Boolean);
+  if (words.length < 5) {
+    return false;
+  }
+
+  const matchingWords = words.filter((word) => CANONICAL_TRANSCRIPTION_PROMPT_WORDS.has(word)).length;
+  const uniqueWords = Array.from(new Set(words));
+  const uniqueMatchingWords = uniqueWords.filter((word) => CANONICAL_TRANSCRIPTION_PROMPT_WORDS.has(word)).length;
+
+  return matchingWords / words.length >= 0.85 && uniqueMatchingWords / uniqueWords.length >= 0.85;
+}
+
+function ensureTranscriptDoesNotEchoPrompt(result: TranscriptNormalizationResult) {
+  const transcriptText = buildTranscriptText(result.tokens);
+  if (!isPromptEchoTranscriptText(transcriptText)) {
+    return;
+  }
+
+  throw new Error(
+    JSON.stringify({
+      code: PROMPT_ECHO_ERROR_CODE,
+      message: "Transcription output echoed the transcription prompt instead of the spoken audio."
+    })
+  );
+}
 
 function secondsToMs(value: unknown, fallback: number) {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -225,7 +304,8 @@ function buildTranscriptionBody({
   fileName,
   model,
   responseFormat,
-  includeWordTimestamps
+  includeWordTimestamps,
+  prompt
 }: {
   audioBuffer: Buffer;
   mimeType: string;
@@ -233,6 +313,7 @@ function buildTranscriptionBody({
   model: string;
   responseFormat: "json" | "text" | "verbose_json";
   includeWordTimestamps: boolean;
+  prompt?: string | null;
 }) {
   const body = new FormData();
   body.append("model", model);
@@ -240,7 +321,9 @@ function buildTranscriptionBody({
   if (includeWordTimestamps) {
     body.append("timestamp_granularities[]", "word");
   }
-  body.append("prompt", TRANSCRIPTION_PROMPT);
+  if (prompt?.trim()) {
+    body.append("prompt", prompt);
+  }
   body.append("file", new File([Uint8Array.from(audioBuffer)], fileName, { type: mimeType }));
   return body;
 }
@@ -266,7 +349,7 @@ async function parseErrorMessage(response: Response) {
 
 function isTimestampCapabilityError(errorText: string) {
   return (
-    /unsupported_value|not compatible/i.test(errorText) &&
+    /unsupported_value|not compatible|not supported/i.test(errorText) &&
     /(response_format|timestamp_granularities)/i.test(errorText)
   );
 }
@@ -278,7 +361,8 @@ async function requestTranscription({
   fileName,
   model,
   responseFormat,
-  includeWordTimestamps
+  includeWordTimestamps,
+  prompt
 }: {
   apiKey: string;
   audioBuffer: Buffer;
@@ -287,6 +371,7 @@ async function requestTranscription({
   model: string;
   responseFormat: "json" | "text" | "verbose_json";
   includeWordTimestamps: boolean;
+  prompt?: string | null;
 }) {
   const response = await fetch(TRANSCRIPTION_URL, {
     method: "POST",
@@ -299,7 +384,8 @@ async function requestTranscription({
       fileName,
       model,
       responseFormat,
-      includeWordTimestamps
+      includeWordTimestamps,
+      prompt
     })
   });
 
@@ -364,28 +450,20 @@ export async function transcribeAudio({
       fileName,
       model: configuredModel,
       responseFormat: "verbose_json",
-      includeWordTimestamps: true
+      includeWordTimestamps: true,
+      prompt: null
     });
 
-    return normalizeTranscript(timedPayload, durationMs);
+    const normalized = normalizeTranscript(timedPayload, durationMs);
+    ensureTranscriptDoesNotEchoPrompt(normalized);
+    return normalized;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    let parsedError: {
-      model?: string;
-      responseFormat?: string;
-      includeWordTimestamps?: boolean;
-      message?: string;
-      rawText?: string;
-    } | null = null;
-
-    try {
-      parsedError = JSON.parse(errorMessage);
-    } catch {
-      parsedError = null;
-    }
+    const parsedError = parseStructuredErrorMessage(error);
 
     const capabilityError = isTimestampCapabilityError(parsedError?.message ?? errorMessage);
-    if (!capabilityError) {
+    const promptEchoError = parsedError?.code === PROMPT_ECHO_ERROR_CODE;
+    if (!capabilityError && !promptEchoError) {
       throw new Error(
         `Transcription request failed for model '${configuredModel}': ${parsedError?.message ?? errorMessage}`
       );
@@ -403,10 +481,13 @@ export async function transcribeAudio({
       fileName,
       model: fallbackModel,
       responseFormat: "verbose_json",
-      includeWordTimestamps: true
+      includeWordTimestamps: true,
+      prompt: null
     });
 
-    return normalizeTranscript(fallbackTimedPayload, durationMs);
+    const normalized = normalizeTranscript(fallbackTimedPayload, durationMs);
+    ensureTranscriptDoesNotEchoPrompt(normalized);
+    return normalized;
   } catch (fallbackError) {
     if (fallbackModel !== configuredModel) {
       try {
@@ -417,13 +498,17 @@ export async function transcribeAudio({
           fileName,
           model: configuredModel,
           responseFormat: "json",
-          includeWordTimestamps: false
+          includeWordTimestamps: false,
+          prompt: null
         });
 
-        return normalizeTranscript(approximatePayload, durationMs);
+        const normalized = normalizeTranscript(approximatePayload, durationMs);
+        ensureTranscriptDoesNotEchoPrompt(normalized);
+        return normalized;
       } catch (approximateError) {
         const approximateMessage =
-          approximateError instanceof Error ? approximateError.message : String(approximateError);
+          parseStructuredErrorMessage(approximateError)?.message ??
+          (approximateError instanceof Error ? approximateError.message : String(approximateError));
         throw new Error(
           `Transcription failed after timestamp fallback. Primary model: '${configuredModel}', timestamp fallback model: '${fallbackModel}'. Final error: ${approximateMessage}`
         );
@@ -431,7 +516,8 @@ export async function transcribeAudio({
     }
 
     const fallbackMessage =
-      fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      parseStructuredErrorMessage(fallbackError)?.message ??
+      (fallbackError instanceof Error ? fallbackError.message : String(fallbackError));
     throw new Error(`Transcription request failed for model '${fallbackModel}': ${fallbackMessage}`);
   }
 }

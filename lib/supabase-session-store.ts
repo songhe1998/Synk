@@ -391,40 +391,85 @@ export async function saveSupabaseSessionUpload(sessionId: string, payload: Uplo
   if (!current) {
     throw new Error("Session not found");
   }
+  const userId = current.user_id;
+  console.info(`[session-upload] ${sessionId} starting upload pipeline`);
 
   const audioExtension = payload.audioExtension || inferAudioExtension(payload.audioMimeType);
-  await uploadSessionBinaryAsset({
-    userId: current.user_id,
-    sessionId,
-    kind: "audio",
-    fileName: `audio.${audioExtension}`,
-    mimeType: payload.audioMimeType,
-    buffer: payload.audioBuffer
-  });
-
-  if (payload.sketchBuffer) {
+  try {
     await uploadSessionBinaryAsset({
-      userId: current.user_id,
+      userId,
       sessionId,
-      kind: "sketch",
-      fileName: getAssetFileName("sketch"),
-      mimeType: "image/png",
-      buffer: payload.sketchBuffer
+      kind: "audio",
+      fileName: `audio.${audioExtension}`,
+      mimeType: payload.audioMimeType,
+      buffer: payload.audioBuffer
     });
+    console.info(`[session-upload] ${sessionId} audio asset uploaded`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to upload audio asset.";
+    throw new Error(`Audio asset upload failed: ${message}`);
   }
 
-  await upsertPayloadRow(sessionId, {
-    events: payload.events
-  });
+  try {
+    await upsertPayloadRow(sessionId, {
+      events: payload.events
+    });
+    console.info(`[session-upload] ${sessionId} drawing events saved`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to save drawing events.";
+    throw new Error(`Session payload write failed: ${message}`);
+  }
 
-  return updateSessionRow(sessionId, {
-    status: "uploaded",
-    duration_ms: payload.durationMs,
-    audio_mime_type: payload.audioMimeType,
-    canvas_width: payload.canvasWidth,
-    canvas_height: payload.canvasHeight,
-    error_message: null
-  });
+  try {
+    await updateSessionRow(sessionId, {
+      status: "uploaded",
+      duration_ms: payload.durationMs,
+      audio_mime_type: payload.audioMimeType,
+      canvas_width: payload.canvasWidth,
+      canvas_height: payload.canvasHeight,
+      error_message: null
+    });
+    console.info(`[session-upload] ${sessionId} session marked uploaded`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update session metadata.";
+    throw new Error(`Session status update failed: ${message}`);
+  }
+
+  const sketchBuffer = payload.sketchBuffer;
+  if (sketchBuffer) {
+    const uploadedSketchBuffer = sketchBuffer!;
+    try {
+      await uploadSessionBinaryAsset({
+        userId,
+        sessionId,
+        kind: "sketch",
+        fileName: getAssetFileName("sketch"),
+        mimeType: "image/png",
+        buffer: uploadedSketchBuffer
+      });
+      console.info(`[session-upload] ${sessionId} sketch asset uploaded`);
+    } catch (error) {
+      let message = "Failed to upload sketch asset.";
+      if (error instanceof globalThis.Error) {
+        message = (error as Error).message;
+      }
+      console.warn(
+        `Sketch asset upload failed for session ${sessionId}; continuing because the sketch can be regenerated from events.`,
+        error
+      );
+      return updateSessionRow(sessionId, {
+        error_message: `Sketch asset upload failed and will be regenerated later: ${message}`
+      });
+    }
+  }
+
+  const refreshed = await getSessionRow(sessionId);
+  if (!refreshed) {
+    throw new Error("Session not found after upload.");
+  }
+
+  console.info(`[session-upload] ${sessionId} upload pipeline finished`);
+  return normalizeSummary(refreshed);
 }
 
 export async function markSupabaseSessionProcessing(sessionId: string) {
