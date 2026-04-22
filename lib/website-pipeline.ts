@@ -1534,6 +1534,11 @@ export async function syncWebsiteGenerationJob(sessionId: string, jobId: string)
     return job;
   }
 
-  void queueWebsiteJobRun(sessionId, jobId);
+  // Only resume explicitly queued jobs. Running/building/exporting jobs may be
+  // owned by another process or sandbox, and blindly queueing them here can
+  // duplicate the same website generation across processes.
+  if (job.status === "queued") {
+    void queueWebsiteJobRun(sessionId, jobId);
+  }
   return (await getWebsiteJob(sessionId, jobId)) ?? job;
 }

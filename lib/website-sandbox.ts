@@ -34,6 +34,8 @@ const CODEX_GENERATION_LOG_PATH = `${ARTIFACTS_DIR}/codex-generation.log`;
 const CODEX_REPAIR_LOG_PATH = `${ARTIFACTS_DIR}/codex-repair.log`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
+const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || null;
+const WEBSITE_CODEX_REASONING_EFFORT = process.env.WEBSITE_CODEX_REASONING_EFFORT?.trim() || "medium";
 const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
 const SNAPSHOT_CACHE_PATH = path.join(process.cwd(), ".cache", "website-sandbox-snapshot.json");
 
@@ -391,6 +393,8 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], l
     .map((imagePath) => `-i ${shellEscape(imagePath)}`)
     .join(" ");
   const commonArgs = [
+    WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
+    `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_REASONING_EFFORT}"`)}`,
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
     "-C",
@@ -415,6 +419,8 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], l
 
 function buildCodexPlannerShellCommand(previewImagePath: string, logPath?: string) {
   const commonArgs = [
+    WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
+    `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_REASONING_EFFORT}"`)}`,
     "--skip-git-repo-check",
     "--ephemeral",
     "-s",
