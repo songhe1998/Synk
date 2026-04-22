@@ -33,6 +33,7 @@ const REPAIR_PROMPT_PATH = `${INPUT_DIR}/repair.txt`;
 const CODEX_GENERATION_LOG_PATH = `${ARTIFACTS_DIR}/codex-generation.log`;
 const CODEX_REPAIR_LOG_PATH = `${ARTIFACTS_DIR}/codex-repair.log`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
+const SANDBOX_COMMAND_WAIT_SLICE_MS = 10 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
 const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || null;
 const WEBSITE_CODEX_REASONING_EFFORT = process.env.WEBSITE_CODEX_REASONING_EFFORT?.trim() || "medium";
@@ -265,12 +266,55 @@ async function runSandboxCommand(
     label: string;
   }
 ) {
-  const finished = await sandbox.runCommand({
+  const detached = await sandbox.runCommand({
     cmd: params.cmd,
     args: params.args,
     cwd: params.cwd,
-    env: params.env
+    env: params.env,
+    detached: true
   });
+  const credentials = getVercelSandboxCredentials();
+  const deadline = Date.now() + DEFAULT_SANDBOX_TIMEOUT_MS;
+  let finished;
+
+  while (true) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`${params.label} timed out after ${Math.round(DEFAULT_SANDBOX_TIMEOUT_MS / 1000)} seconds.`);
+    }
+
+    try {
+      finished = await detached.wait({
+        signal: AbortSignal.timeout(Math.min(SANDBOX_COMMAND_WAIT_SLICE_MS, remainingMs))
+      });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const isWaitSliceTimeout =
+        message.includes("aborted") ||
+        message.includes("timeout") ||
+        message.includes("timed out") ||
+        message.includes("signal");
+
+      if (!isWaitSliceTimeout) {
+        throw error;
+      }
+
+      const sandboxSnapshot = await Sandbox.get({
+        sandboxId: sandbox.sandboxId,
+        teamId: credentials.teamId,
+        projectId: credentials.projectId,
+        token: credentials.token
+      }).catch(() => null);
+
+      if (sandboxSnapshot && sandboxSnapshot.status !== "running" && sandboxSnapshot.status !== "pending") {
+        throw new Error(
+          `${params.label} terminated because sandbox ${sandboxSnapshot.status} before the command reported completion.`
+        );
+      }
+    }
+  }
+
   const stdout = await finished.stdout();
   const stderr = await finished.stderr();
 
@@ -395,6 +439,7 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], l
   const commonArgs = [
     WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
     `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_REASONING_EFFORT}"`)}`,
+    "--color never",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
     "-C",
@@ -405,7 +450,7 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], l
     .filter(Boolean)
     .join(" ");
   const pipedCommand = logPath
-    ? `set -o pipefail; cat ${shellEscape(promptPath)} | COMMAND_PLACEHOLDER 2>&1 | tee ${shellEscape(logPath)}`
+    ? `cat ${shellEscape(promptPath)} | COMMAND_PLACEHOLDER > ${shellEscape(logPath)} 2>&1`
     : `cat ${shellEscape(promptPath)} | COMMAND_PLACEHOLDER`;
 
   return [
