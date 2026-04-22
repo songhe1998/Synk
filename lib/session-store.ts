@@ -39,6 +39,7 @@ import { listLocalWorldJobs, listWorldJobs } from "@/lib/world-store";
 const DATA_ROOT = path.resolve(process.env.SESSION_DATA_ROOT || path.join(process.cwd(), "data", "sessions"));
 const INDEX_PATH = path.join(DATA_ROOT, "index.json");
 const MAX_SESSIONS = 8;
+const GALLERY_SESSION_LIMIT = 8;
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
 const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
@@ -344,28 +345,28 @@ export async function createSession(
   return summary;
 }
 
-export async function listRecentSessions(userId?: string) {
+export async function listRecentSessions(userId?: string, limit = 24) {
   if (hasSupabaseAdminConfig()) {
     if (!userId) {
       return [];
     }
 
-    return listSupabaseRecentSessions(userId);
+    return listSupabaseRecentSessions(userId, limit);
   }
 
   const summaries = await readIndex();
   return Promise.all(
-    summaries.map(async (summary) => ({
+    summaries.slice(0, limit).map(async (summary) => ({
       ...summary,
       preferredResultUrl: await getPreferredResultUrl(summary.id)
     }))
   );
 }
 
-export async function listLocalRecentSessions() {
+export async function listLocalRecentSessions(limit = 24) {
   const summaries = await readIndex();
   return Promise.all(
-    summaries.map(async (summary) => ({
+    summaries.slice(0, limit).map(async (summary) => ({
       ...summary,
       preferredResultUrl: await getLocalPreferredResultUrl(summary.id)
     }))
@@ -374,16 +375,16 @@ export async function listLocalRecentSessions() {
 
 export async function listGallerySessions(userId?: string) {
   if (!hasSupabaseAdminConfig()) {
-    return listRecentSessions(userId);
+    return listRecentSessions(userId, GALLERY_SESSION_LIMIT);
   }
 
-  const localSessions = await listLocalRecentSessions();
+  const localSessions = await listLocalRecentSessions(GALLERY_SESSION_LIMIT);
   if (!userId) {
     return localSessions;
   }
 
-  const cloudSessions = await listSupabaseRecentSessions(userId);
-  return mergeRecentSummaries([...cloudSessions, ...localSessions]);
+  const cloudSessions = await listSupabaseRecentSessions(userId, GALLERY_SESSION_LIMIT);
+  return mergeRecentSummaries([...cloudSessions, ...localSessions]).slice(0, GALLERY_SESSION_LIMIT);
 }
 
 export async function deleteSession(sessionId: string, userId?: string) {

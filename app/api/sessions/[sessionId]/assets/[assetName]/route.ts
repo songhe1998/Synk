@@ -48,7 +48,7 @@ export async function GET(
     headers: {
       "Content-Type": asset.mimeType,
       "Content-Disposition": `inline; filename="${asset.fileName}"`,
-      "Cache-Control": "no-store"
+      "Cache-Control": "private, max-age=31536000, immutable"
     }
   });
 }

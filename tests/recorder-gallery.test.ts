@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildGalleryItemFromSession,
+  buildPlaceholderGalleryItem,
   buildPendingGalleryItem,
   mergeVideoJobIntoSession,
   mergeWorldJobIntoSession
 } from "../lib/recorder-gallery";
-import { SessionDetail, VideoJob, WorldJob } from "../lib/types";
+import { SessionDetail, VideoJob, WebsiteJob, WorldJob } from "../lib/types";
 
 function makeSession(overrides: Partial<SessionDetail> = {}): SessionDetail {
   return {
@@ -100,6 +101,37 @@ function makeWorldJob(overrides: Partial<WorldJob> = {}): WorldJob {
   };
 }
 
+function makeWebsiteJob(overrides: Partial<WebsiteJob> = {}): WebsiteJob {
+  return {
+    id: "website-1",
+    sessionId: "session-1",
+    status: "succeeded",
+    createdAt: "2026-04-18T10:03:00.000Z",
+    updatedAt: "2026-04-18T10:05:00.000Z",
+    completedAt: "2026-04-18T10:05:00.000Z",
+    displayName: "Website One",
+    framework: "vite-react",
+    sandboxProvider: "vercel",
+    sandboxId: "sbx-1",
+    transcriptText: "Build a website.",
+    pages: [],
+    prompt: "Create a website.",
+    statusDetail: "Website ready.",
+    errorMessage: null,
+    previewImageUrl: "/api/sessions/session-1/websites/website-1/asset?kind=previewImage",
+    codeArchiveUrl: "/api/sessions/session-1/websites/website-1/asset?kind=codeArchive",
+    distArchiveUrl: "/api/sessions/session-1/websites/website-1/asset?kind=distArchive",
+    previewUrl: "/sessions/session-1/websites/website-1",
+    previewImageFileName: "preview.png",
+    previewImageMimeType: "image/png",
+    codeArchiveFileName: "code.tar.gz",
+    codeArchiveMimeType: "application/gzip",
+    distArchiveFileName: "dist.tar.gz",
+    distArchiveMimeType: "application/gzip",
+    ...overrides
+  };
+}
+
 test("image gallery items prefer the generated image and image detail page", () => {
   const session = makeSession();
   const item = buildGalleryItemFromSession(session);
@@ -121,7 +153,7 @@ test("video gallery items switch to the source image while the final video is st
   assert.equal(item.target, "video");
   assert.equal(item.previewKind, "source");
   assert.equal(item.thumbnailUrl, "/api/sessions/session-1/assets/generatedVideoSourceImage");
-  assert.equal(item.href, "/sessions/session-1/videos/video-1");
+  assert.equal(item.href, null);
   assert.equal(item.status, "running");
   assert.equal(item.statusLabel, "Rendering");
 });
@@ -159,6 +191,19 @@ test("world gallery items stay running until renderable splats are available", (
   assert.equal(buildGalleryItemFromSession(readySession, "world").status, "ready");
 });
 
+test("website gallery items prefer the generated preview image over the labeled sketch", () => {
+  const session = makeSession({
+    websiteJobs: [makeWebsiteJob()]
+  });
+  const item = buildGalleryItemFromSession(session, "website");
+
+  assert.equal(item.target, "website");
+  assert.equal(item.previewKind, "source");
+  assert.equal(item.thumbnailUrl, "/api/sessions/session-1/websites/website-1/asset?kind=previewImage");
+  assert.equal(item.href, "/sessions/session-1/websites/website-1");
+  assert.equal(item.status, "ready");
+});
+
 test("pending gallery items keep the sketch thumbnail until the source image exists", () => {
   const item = buildPendingGalleryItem({
     sessionId: "session-2",
@@ -172,6 +217,30 @@ test("pending gallery items keep the sketch thumbnail until the source image exi
   assert.equal(item.thumbnailUrl, "data:image/png;base64,abc");
   assert.equal(item.status, "pending");
   assert.equal(item.jobId, null);
+  assert.equal(item.href, null);
+});
+
+test("placeholder gallery items do not fall back to the session detail page when no result is ready", () => {
+  const item = buildPlaceholderGalleryItem({
+    id: "session-3",
+    title: "Session Three",
+    status: "processing",
+    createdAt: "2026-04-18T10:06:00.000Z",
+    updatedAt: "2026-04-18T10:06:30.000Z",
+    durationMs: 1200,
+    audioMimeType: "audio/webm",
+    canvasWidth: 1280,
+    canvasHeight: 720,
+    transcriptApproximate: false,
+    analysisReasoningEffort: "medium",
+    imageSizePreset: "medium",
+    imageGenerationProfile: "pro",
+    errorMessage: null,
+    preferredResultUrl: null
+  });
+
+  assert.equal(item.href, null);
+  assert.equal(item.status, "pending");
 });
 
 test("job merge helpers keep the latest synchronized job at the front of the session detail", () => {

@@ -326,14 +326,14 @@ export async function createSupabaseSession(
   return normalizeSummary(data);
 }
 
-export async function listSupabaseRecentSessions(userId: string) {
+export async function listSupabaseRecentSessions(userId: string, limit = 24) {
   const admin = getSupabaseAdminClient();
   const { data, error } = await admin
     .from("sessions")
     .select("*")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
-    .limit(24);
+    .limit(limit);
 
   if (error) {
     throw normalizeSupabaseError(error);

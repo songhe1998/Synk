@@ -94,19 +94,31 @@ export default async function DashboardPage() {
             <p className="empty-copy">No saved sessions yet. Start a sketch from the homepage to populate your dashboard.</p>
           ) : (
             sessions.map((session) => (
-              <Link
-                key={session.id}
-                href={(session.preferredResultUrl ?? `/sessions/${session.id}`) as Route}
-                className="session-link"
-              >
-                <div>
-                  <p className="session-title">{session.title}</p>
-                  <p className="session-meta">
-                    {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)}
-                  </p>
+              session.preferredResultUrl ? (
+                <Link
+                  key={session.id}
+                  href={session.preferredResultUrl as Route}
+                  className="session-link"
+                >
+                  <div>
+                    <p className="session-title">{session.title}</p>
+                    <p className="session-meta">
+                      {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)}
+                    </p>
+                  </div>
+                  <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
+                </Link>
+              ) : (
+                <div key={session.id} className="session-link" aria-disabled="true">
+                  <div>
+                    <p className="session-title">{session.title}</p>
+                    <p className="session-meta">
+                      {relativeDate(session.createdAt)} · {formatDuration(session.durationMs)} · Not ready yet
+                    </p>
+                  </div>
+                  <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
                 </div>
-                <span className={`status-badge status-${session.status}`}>{statusLabel(session.status)}</span>
-              </Link>
+              )
             ))
           )}
         </div>

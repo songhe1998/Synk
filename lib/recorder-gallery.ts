@@ -99,7 +99,7 @@ function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
     title: session.title,
     createdAt: session.createdAt,
     target: "image",
-    href: sourceImageUrl ? `/sessions/${session.id}/image` : `/sessions/${session.id}`,
+    href: sourceImageUrl ? `/sessions/${session.id}/image` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl,
@@ -130,7 +130,7 @@ function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
     title: session.title,
     createdAt: session.createdAt,
     target: "video",
-    href: job ? `/sessions/${session.id}/videos/${job.id}` : `/sessions/${session.id}`,
+    href: job && (ready || failed) ? `/sessions/${session.id}/videos/${job.id}` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl,
@@ -171,7 +171,7 @@ function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
     title: session.title,
     createdAt: session.createdAt,
     target: "world",
-    href: job ? `/sessions/${session.id}/worlds/${job.id}` : `/sessions/${session.id}`,
+    href: job && (ready || failed) ? `/sessions/${session.id}/worlds/${job.id}` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl,
@@ -191,7 +191,7 @@ function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
 
 function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const job = getLatestWebsiteJob(session);
-  const sourceImageUrl = session.annotatedSketchUrl ?? session.sketchUrl ?? null;
+  const sourceImageUrl = job?.previewImageUrl ?? session.annotatedSketchUrl ?? session.sketchUrl ?? null;
   const sketchThumbnailUrl = session.sketchUrl;
   const thumbnailUrl = sourceImageUrl ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && job.distArchiveUrl);
@@ -202,7 +202,7 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
     title: session.title,
     createdAt: session.createdAt,
     target: "website",
-    href: job ? `/sessions/${session.id}/websites/${job.id}` : `/sessions/${session.id}`,
+    href: job && (ready || failed) ? `/sessions/${session.id}/websites/${job.id}` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl,
@@ -237,7 +237,7 @@ export function buildPlaceholderGalleryItem(summary: SessionSummary): RecorderGa
     title: summary.title,
     createdAt: summary.createdAt,
     target,
-    href: summary.preferredResultUrl ?? `/sessions/${summary.id}`,
+    href: summary.preferredResultUrl ?? null,
     thumbnailUrl: null,
     sketchThumbnailUrl: null,
     sourceImageUrl: null,
@@ -271,7 +271,7 @@ export function buildPendingGalleryItem({
     title,
     createdAt,
     target,
-    href: `/sessions/${sessionId}`,
+    href: null,
     thumbnailUrl: sketchThumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl: null,

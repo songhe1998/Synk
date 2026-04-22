@@ -1,7 +1,7 @@
 "use client";
 
 import type { Route } from "next";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { DEMO_CANVAS, applyDrawingEvent, createEmptyDrawingState, drawDrawingState } from "@/lib/drawing";
 import {
@@ -14,7 +14,7 @@ import {
   RecorderGalleryItem,
   RecorderGalleryTarget
 } from "@/lib/recorder-gallery";
-import { useSupabaseAuthCompletion } from "@/lib/use-supabase-auth-completion";
+import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
   AnalysisReasoningEffort,
   DrawingEvent,
@@ -41,6 +41,7 @@ const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
 const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
+const GALLERY_CACHE_VERSION = "v1";
 
 type OutputTarget = RecorderGalleryTarget;
 type RecorderPhase = "idle" | "arming" | "listening" | "paused" | "handoff" | "error";
@@ -73,6 +74,12 @@ interface VoiceMonitor {
   processor: ScriptProcessorNode;
   silenceGain: GainNode;
   sampleRate: number;
+}
+
+interface GalleryContextMenuState {
+  sessionId: string;
+  x: number;
+  y: number;
 }
 
 interface FinalizeOptionsSnapshot {
@@ -125,6 +132,10 @@ function outputTargetSummary(target: OutputTarget, websiteEnabled: boolean) {
 
 function sortGalleryItems(items: RecorderGalleryItem[]) {
   return [...items].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+}
+
+function getGalleryCacheKey(viewerId: string | null) {
+  return `synk:gallery:${GALLERY_CACHE_VERSION}:${viewerId ?? "guest"}`;
 }
 
 function cloneDrawingEvents(events: DrawingEvent[]) {
@@ -198,6 +209,7 @@ export function RecorderShell({
     imageGenerationProfile: "pro" as ImageGenerationProfile
   });
   const canListenRef = useRef(!(authEnabled && !viewer));
+  const galleryNoticeTimeoutRef = useRef<number | null>(null);
 
   const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
@@ -211,6 +223,10 @@ export function RecorderShell({
   );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [galleryNotice, setGalleryNotice] = useState<string | null>(null);
+  const [activeViewer, setActiveViewer] = useState<Viewer | null>(viewer);
+  const [galleryContextMenu, setGalleryContextMenu] = useState<GalleryContextMenuState | null>(null);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [authPromptVisible, setAuthPromptVisible] = useState(false);
   const [activeDrawer, setActiveDrawer] = useState<"settings" | null>(null);
   const [flight, setFlight] = useState<SketchFlight | null>(null);
@@ -232,15 +248,101 @@ export function RecorderShell({
   }, [analysisReasoningEffort, imageGenerationProfile, imageSizePreset]);
 
   useEffect(() => {
-    canListenRef.current = !(authEnabled && !viewer);
-  }, [authEnabled, viewer]);
+    setActiveViewer(viewer);
+  }, [viewer]);
 
   useEffect(() => {
-    if (viewer) {
+    if (!authEnabled) {
+      return;
+    }
+
+    const supabase = getSupabaseBrowserClient();
+    let cancelled = false;
+
+    const syncViewer = async () => {
+      const {
+        data: { user }
+      } = await supabase.auth.getUser();
+
+      if (cancelled) {
+        return;
+      }
+
+      setActiveViewer(
+        user
+          ? {
+              id: user.id,
+              email: user.email ?? null
+            }
+          : null
+      );
+    };
+
+    void syncViewer();
+
+    const {
+      data: { subscription }
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (cancelled) {
+        return;
+      }
+
+      const user = session?.user ?? null;
+      setActiveViewer(
+        user
+          ? {
+              id: user.id,
+              email: user.email ?? null
+            }
+          : null
+      );
+    });
+
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
+  }, [authEnabled]);
+
+  useEffect(() => {
+    canListenRef.current = !(authEnabled && !activeViewer);
+  }, [activeViewer, authEnabled]);
+
+  useEffect(() => {
+    if (activeViewer) {
       setAuthPromptVisible(false);
       setAuthNotice(null);
     }
-  }, [viewer]);
+  }, [activeViewer]);
+
+  useEffect(() => {
+    return () => {
+      if (galleryNoticeTimeoutRef.current !== null) {
+        window.clearTimeout(galleryNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!galleryContextMenu) {
+      return;
+    }
+
+    const handlePointerDown = () => setGalleryContextMenu(null);
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setGalleryContextMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [galleryContextMenu]);
 
   useEffect(() => {
     if (!websiteEnabled && outputTarget === "website") {
@@ -261,22 +363,6 @@ export function RecorderShell({
 
     drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
   }, []);
-
-  useSupabaseAuthCompletion({
-    authEnabled,
-    redirectTarget: "/dashboard",
-    enabled: !viewer,
-    onStart: () => {
-      setAuthPromptVisible(false);
-      setAuthNotice("Finishing sign-in...");
-      setErrorMessage(null);
-    },
-    onError: (message) => {
-      setAuthPromptVisible(false);
-      setAuthNotice(null);
-      setErrorMessage(message);
-    }
-  });
 
   function redrawCanvas() {
     const canvas = canvasRef.current;
@@ -399,6 +485,13 @@ export function RecorderShell({
     );
   }
 
+  function removeGalleryItem(sessionId: string) {
+    setGalleryItems((current) => current.filter((item) => item.sessionId !== sessionId));
+    sessionDetailsRef.current.delete(sessionId);
+    galleryCardRefs.current.delete(sessionId);
+    pollingSessionsRef.current.delete(sessionId);
+  }
+
   function patchGalleryItem(sessionId: string, updater: (item: RecorderGalleryItem) => RecorderGalleryItem) {
     setGalleryItems((current) =>
       sortGalleryItems(
@@ -411,6 +504,59 @@ export function RecorderShell({
         })
       )
     );
+  }
+
+  function showGalleryNotice(message: string) {
+    if (galleryNoticeTimeoutRef.current !== null) {
+      window.clearTimeout(galleryNoticeTimeoutRef.current);
+    }
+
+    setGalleryNotice(message);
+    galleryNoticeTimeoutRef.current = window.setTimeout(() => {
+      setGalleryNotice(null);
+      galleryNoticeTimeoutRef.current = null;
+    }, 2800);
+  }
+
+  function openGalleryContextMenu(event: React.MouseEvent, sessionId: string) {
+    event.preventDefault();
+
+    if (authEnabled && !activeViewer) {
+      setErrorMessage(null);
+      setAuthNotice("Sign in to manage and delete saved sessions.");
+      setAuthPromptVisible(true);
+      return;
+    }
+
+    setGalleryContextMenu({
+      sessionId,
+      x: event.clientX,
+      y: event.clientY
+    });
+  }
+
+  async function deleteGallerySession(sessionId: string) {
+    setGalleryContextMenu(null);
+    setDeletingSessionId(sessionId);
+    setErrorMessage(null);
+
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}`, {
+        method: "DELETE"
+      });
+      const payload = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(readRouteError(payload, "Failed to delete the session."));
+      }
+
+      removeGalleryItem(sessionId);
+      showGalleryNotice("Deleted from the gallery.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete the session.");
+    } finally {
+      setDeletingSessionId(null);
+    }
   }
 
   function preserveQueuedSketchPreview(currentItem: RecorderGalleryItem, nextItem: RecorderGalleryItem) {
@@ -431,6 +577,17 @@ export function RecorderShell({
       sketchThumbnailUrl: currentItem.sketchThumbnailUrl,
       previewKind: "sketch" as const
     };
+  }
+
+  function mergeGalleryItems(items: RecorderGalleryItem[]) {
+    setGalleryItems((current) => {
+      const bySessionId = new Map(current.map((item) => [item.sessionId, item]));
+      for (const item of items) {
+        bySessionId.set(item.sessionId, item);
+      }
+
+      return sortGalleryItems(Array.from(bySessionId.values()));
+    });
   }
 
   function launchSketchFlight(itemId: string, imageUrl: string | null) {
@@ -675,7 +832,7 @@ export function RecorderShell({
     }
   }
 
-  async function hydrateRecentSessions(summaries: SessionSummary[]) {
+  function mergeInitialGalleryPlaceholders(summaries: SessionSummary[]) {
     setGalleryItems((current) => {
       const bySessionId = new Map(current.map((item) => [item.sessionId, item]));
       for (const summary of summaries) {
@@ -686,18 +843,6 @@ export function RecorderShell({
 
       return sortGalleryItems(Array.from(bySessionId.values()));
     });
-
-    await Promise.allSettled(
-      summaries.map(async (summary) => {
-        const session = await fetchSessionDetail(summary.id);
-        if (!session) {
-          return;
-        }
-
-        sessionDetailsRef.current.set(summary.id, session);
-        upsertGalleryItem(buildGalleryItemFromSession(session, buildPlaceholderGalleryItem(summary).target));
-      })
-    );
   }
 
   async function markGalleryItemFailed(sessionId: string, target: OutputTarget, message: string) {
@@ -1045,8 +1190,80 @@ export function RecorderShell({
   }
 
   useEffect(() => {
-    void hydrateRecentSessions(initialSessions);
+    mergeInitialGalleryPlaceholders(initialSessions);
   }, [initialSessions]);
+
+  useLayoutEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const cached = window.sessionStorage.getItem(getGalleryCacheKey(activeViewer?.id ?? null));
+      if (!cached) {
+        return;
+      }
+
+      const items = JSON.parse(cached) as RecorderGalleryItem[];
+      if (!Array.isArray(items) || items.length === 0) {
+        return;
+      }
+
+      mergeGalleryItems(items);
+    } catch (error) {
+      console.warn("Failed to restore gallery cache.", error);
+    }
+  }, [activeViewer?.id]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      window.sessionStorage.setItem(
+        getGalleryCacheKey(activeViewer?.id ?? null),
+        JSON.stringify(galleryItems.slice(0, 8))
+      );
+    } catch (error) {
+      console.warn("Failed to persist gallery cache.", error);
+    }
+  }, [activeViewer?.id, galleryItems]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const loadGallerySessions = async () => {
+      try {
+        const response = await fetch("/api/sessions/recent", {
+          cache: "no-store",
+          signal: controller.signal
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(readRouteError(payload, "Failed to load recent sessions."));
+        }
+
+        const items = (await response.json()) as RecorderGalleryItem[];
+        if (!Array.isArray(items)) {
+          throw new Error("Recent sessions response was malformed.");
+        }
+
+        mergeGalleryItems(items);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        console.error("Failed to load gallery sessions.", error);
+      }
+    };
+
+    void loadGallerySessions();
+
+    return () => controller.abort();
+  }, [activeViewer?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1072,7 +1289,7 @@ export function RecorderShell({
   }, []);
 
   useEffect(() => {
-    if (authEnabled && !viewer) {
+    if (authEnabled && !activeViewer) {
       takeRef.current = null;
       void stopVoiceMonitoring();
       setPhase("idle");
@@ -1080,7 +1297,7 @@ export function RecorderShell({
     }
 
     void ensureVoiceMonitoring();
-  }, [authEnabled, viewer]);
+  }, [activeViewer, authEnabled]);
 
   useEffect(() => {
     windowFocusedRef.current = document.hasFocus();
@@ -1151,7 +1368,7 @@ export function RecorderShell({
   }, []);
 
   function handlePointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (authEnabled && !viewer) {
+    if (authEnabled && !activeViewer) {
       setErrorMessage(null);
       setAuthNotice("Sign in to start sketching, recording, and saving sessions.");
       setAuthPromptVisible(true);
@@ -1226,8 +1443,8 @@ export function RecorderShell({
           </div>
 
           <div className="recorder-header-actions">
-            <Link href={(viewer ? "/dashboard" : signInHref) as Route} className="recorder-hud-button">
-              {viewer ? "Dashboard" : "Sign in"}
+            <Link href={(activeViewer ? "/dashboard" : signInHref) as Route} className="recorder-hud-button">
+              {activeViewer ? "Dashboard" : "Sign in"}
             </Link>
             <button
               type="button"
@@ -1239,10 +1456,10 @@ export function RecorderShell({
           </div>
         </header>
 
-        {authNotice || errorMessage || setupMessage ? (
+        {authNotice || errorMessage || galleryNotice || setupMessage ? (
           <div className="recorder-floating-alert">
-            <p className="recorder-floating-alert-copy">{authNotice ?? errorMessage ?? setupMessage}</p>
-            {authPromptVisible && authEnabled && !viewer ? (
+            <p className="recorder-floating-alert-copy">{authNotice ?? errorMessage ?? galleryNotice ?? setupMessage}</p>
+            {authPromptVisible && authEnabled && !activeViewer ? (
               <div className="recorder-floating-alert-actions">
                 <Link href={signInHref as Route} className="recorder-hud-button recorder-hud-button-strong">
                   Log in / Sign up
@@ -1356,6 +1573,7 @@ export function RecorderShell({
                     key={item.sessionId}
                     ref={(node) => setGalleryCardRef(item.sessionId, node)}
                     className={getGalleryCardClass(item)}
+                    onContextMenu={(event) => openGalleryContextMenu(event, item.sessionId)}
                   >
                     {item.href ? (
                       <Link
@@ -1367,15 +1585,44 @@ export function RecorderShell({
                         {thumb}
                       </Link>
                     ) : (
-                      <div className="recorder-gallery-card-link recorder-gallery-card-link-compact" title={item.title}>
+                      <button
+                        type="button"
+                        className="recorder-gallery-card-link recorder-gallery-card-link-compact recorder-gallery-card-link-button"
+                        title={item.title}
+                        aria-label={`${item.title} is not ready yet`}
+                        onClick={() =>
+                          showGalleryNotice(
+                            item.status === "failed"
+                              ? item.detail || "This result failed."
+                              : `${item.title} isn't ready yet. ${item.detail}`
+                          )
+                        }
+                      >
                         {thumb}
-                      </div>
+                      </button>
                     )}
                   </article>
                 );
               })}
             </div>
           </aside>
+
+          {galleryContextMenu ? (
+            <div
+              className="recorder-gallery-context-menu"
+              style={{ left: galleryContextMenu.x, top: galleryContextMenu.y }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <button
+                type="button"
+                className="recorder-gallery-context-menu-item recorder-gallery-context-menu-item-danger"
+                onClick={() => void deleteGallerySession(galleryContextMenu.sessionId)}
+                disabled={deletingSessionId === galleryContextMenu.sessionId}
+              >
+                {deletingSessionId === galleryContextMenu.sessionId ? "Deleting..." : "Delete"}
+              </button>
+            </div>
+          ) : null}
         </div>
 
         {activeDrawer ? <button type="button" className="recorder-drawer-scrim" onClick={() => setActiveDrawer(null)} /> : null}
