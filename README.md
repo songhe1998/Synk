@@ -54,6 +54,12 @@ npm run start
 - `OPENAI_API_KEY`
 - `OPENAI_TRANSCRIBE_MODEL`
   Default: `gpt-4o-mini-transcribe`
+- `CODEX_AUTH_JSON_B64`
+  Required for preview-first website generation on hosted workers such as Render. This should be the base64-encoded contents of your Codex `auth.json`.
+- `VERCEL_TEAM_ID`
+- `VERCEL_PROJECT_ID`
+- `VERCEL_TOKEN`
+  Required for Vercel Sandbox-backed website generation.
 - `OPENAI_SCENE_MODEL`
   Default: `gpt-5.4`
 - `OPENAI_VIDEO_SOURCE_PLAN_MODEL`
@@ -91,7 +97,12 @@ Recommended deployment flow:
 2. In Render, create a new Blueprint from the repo.
 3. Review the generated `synk-demo` web service.
 4. Set `OPENAI_API_KEY` in the Render dashboard when prompted.
-5. Deploy.
+5. If you want website generation in production, also set:
+   - `CODEX_AUTH_JSON_B64`
+   - `VERCEL_TEAM_ID`
+   - `VERCEL_PROJECT_ID`
+   - `VERCEL_TOKEN`
+6. Deploy.
 
 Important:
 - This app stores all session assets on the local filesystem. On Render, that means you should keep the persistent disk. Without it, session data will disappear on redeploys and restarts.

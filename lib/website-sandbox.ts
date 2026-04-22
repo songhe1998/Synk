@@ -9,6 +9,11 @@ import { getWebsitePreviewMimeType } from "@/lib/website-artifacts";
 import { findMetaCopyPatternMatches } from "@/lib/website-meta-copy";
 import { getSessionAsset } from "@/lib/session-store";
 import { readCodexAuthJson } from "@/lib/codex-auth";
+import {
+  type WebsiteAssetPlan,
+  buildCodexPlannerPrompt,
+  getWebsiteAssetPlanSchema
+} from "@/lib/website-asset-plan";
 import type { WebsiteGeneratedAsset } from "@/lib/website-preview-chain";
 
 const TEMPLATE_ROOT = path.join(process.cwd(), "templates", "website-vite-react");
@@ -22,6 +27,10 @@ const CODEX_BIN_PATH = `${TOOLING_DIR}/node_modules/.bin/codex`;
 const CODEX_HOME_ROOT = `${SANDBOX_ROOT}/run-codex-home`;
 const CODEX_HOME_DIR = `${CODEX_HOME_ROOT}/.codex`;
 const CODEX_AUTH_PATH = `${CODEX_HOME_DIR}/auth.json`;
+const PLANNER_DIR = `${SANDBOX_ROOT}/planner`;
+const PLANNER_PROMPT_PATH = `${PLANNER_DIR}/prompt.txt`;
+const PLANNER_SCHEMA_PATH = `${PLANNER_DIR}/schema.json`;
+const PLANNER_OUTPUT_PATH = `${PLANNER_DIR}/plan.json`;
 const REPAIR_PROMPT_PATH = `${INPUT_DIR}/repair.txt`;
 const META_COPY_REPAIR_PROMPT_PATH = `${INPUT_DIR}/meta-copy-repair.txt`;
 const VISUAL_QA_PROMPT_PATH = `${INPUT_DIR}/visual-qa.txt`;
@@ -413,6 +422,32 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = []) {
     `cat ${shellEscape(promptPath)} | ${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs};`,
     "else",
     `cat ${shellEscape(promptPath)} | npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs};`,
+    "fi"
+  ].join(" ");
+}
+
+function buildCodexPlannerShellCommand(previewImagePath: string) {
+  const commonArgs = [
+    "--skip-git-repo-check",
+    "--ephemeral",
+    "-s",
+    "read-only",
+    "-C",
+    shellEscape(PLANNER_DIR),
+    "-i",
+    shellEscape(previewImagePath),
+    "--output-schema",
+    shellEscape(PLANNER_SCHEMA_PATH),
+    "--output-last-message",
+    shellEscape(PLANNER_OUTPUT_PATH),
+    "-"
+  ].join(" ");
+
+  return [
+    `if [ -x ${shellEscape(CODEX_BIN_PATH)} ]; then`,
+    `cat ${shellEscape(PLANNER_PROMPT_PATH)} | ${shellEscape(CODEX_BIN_PATH)} exec ${commonArgs};`,
+    "else",
+    `cat ${shellEscape(PLANNER_PROMPT_PATH)} | npx -y ${shellEscape(DEFAULT_CODEX_PACKAGE)} exec ${commonArgs};`,
     "fi"
   ].join(" ");
 }
@@ -996,5 +1031,74 @@ export async function runWebsiteSandboxJob({
     };
   } finally {
     await sandbox.stop({ blocking: true }).catch(() => undefined);
+  }
+}
+
+export async function runWebsiteAssetPlanner(params: {
+  previewImageBuffer: Buffer;
+  transcriptText: string;
+}) {
+  const credentials = getVercelSandboxCredentials();
+  const source = await getSandboxCreateSource(credentials);
+  const sandbox = source
+    ? await Sandbox.create({
+        ...credentials,
+        source,
+        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
+        resources: {
+          vcpus: 2
+        }
+      })
+    : await Sandbox.create({
+        ...credentials,
+        runtime: "node22",
+        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
+        resources: {
+          vcpus: 2
+        }
+      });
+
+  try {
+    const authJson = await readCodexAuthJson();
+    await sandbox.fs.mkdir(PLANNER_DIR, { recursive: true });
+    await sandbox.writeFiles([
+      {
+        path: PLANNER_PROMPT_PATH,
+        content: Buffer.from(buildCodexPlannerPrompt(params.transcriptText), "utf8")
+      },
+      {
+        path: PLANNER_SCHEMA_PATH,
+        content: Buffer.from(JSON.stringify(getWebsiteAssetPlanSchema(), null, 2), "utf8")
+      },
+      {
+        path: `${PLANNER_DIR}/target-preview.png`,
+        content: params.previewImageBuffer
+      },
+      {
+        path: CODEX_AUTH_PATH,
+        content: Buffer.from(authJson, "utf8")
+      }
+    ]);
+
+    await runSandboxCommand(sandbox, {
+      cmd: "bash",
+      args: ["-lc", buildCodexPlannerShellCommand(`${PLANNER_DIR}/target-preview.png`)],
+      env: buildRunEnvironment(),
+      label: "Codex website asset planner"
+    });
+
+    const outputBuffer = await sandbox.readFileToBuffer({
+      path: PLANNER_OUTPUT_PATH
+    });
+
+    if (!outputBuffer) {
+      throw new Error("Sandbox planner finished without returning an asset plan.");
+    }
+
+    return JSON.parse(outputBuffer.toString("utf8")) as WebsiteAssetPlan;
+  } finally {
+    if (sandbox.status !== "stopped" && sandbox.status !== "failed") {
+      await sandbox.stop({ blocking: true }).catch(() => undefined);
+    }
   }
 }

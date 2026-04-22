@@ -1,36 +1,15 @@
 import fs from "fs";
 import path from "path";
 import sharp from "sharp";
-import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
-import { tmpdir } from "os";
-import { spawn } from "child_process";
-import { randomUUID } from "crypto";
 import { generateImageFromSketch } from "@/lib/scene-analysis";
+import {
+  type WebsiteAssetPlan,
+  type WebsiteImageryComponent
+} from "@/lib/website-asset-plan";
 
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const IMAGE_ORCHESTRATOR_MODEL = process.env.OPENAI_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4";
 const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-2";
-
-export interface WebsiteAssetPlanComponent {
-  name: string;
-  role: string;
-  rationale: string;
-}
-
-export interface WebsiteImageryComponent {
-  name: string;
-  role: string;
-  rationale: string;
-  target_description: string;
-  prompt: string;
-  aspect_ratio: "portrait" | "landscape" | "square";
-}
-
-export interface WebsiteAssetPlan {
-  shared_style_language: string;
-  code_components: WebsiteAssetPlanComponent[];
-  imagery_components: WebsiteImageryComponent[];
-}
 
 export interface WebsiteGeneratedAsset {
   component: WebsiteImageryComponent;
@@ -103,51 +82,6 @@ async function createPlaceholderAsset(component: WebsiteImageryComponent) {
   return sharp(Buffer.from(svg)).png().toBuffer();
 }
 
-function getAssetPlanSchema() {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["shared_style_language", "code_components", "imagery_components"],
-    properties: {
-      shared_style_language: {
-        type: "string"
-      },
-      code_components: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["name", "role", "rationale"],
-          properties: {
-            name: { type: "string" },
-            role: { type: "string" },
-            rationale: { type: "string" }
-          }
-        }
-      },
-      imagery_components: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["name", "role", "rationale", "target_description", "prompt", "aspect_ratio"],
-          properties: {
-            name: { type: "string" },
-            role: { type: "string" },
-            rationale: { type: "string" },
-            target_description: { type: "string" },
-            prompt: { type: "string" },
-            aspect_ratio: {
-              type: "string",
-              enum: ["portrait", "landscape", "square"]
-            }
-          }
-        }
-      }
-    }
-  };
-}
-
 export function buildWebsitePreviewPrompt(transcriptText: string) {
   return [
     "Generate a single polished desktop website preview image.",
@@ -186,98 +120,6 @@ export async function generateWebsitePreviewFromSketch(params: {
     buffer: result.buffer,
     model: result.model
   };
-}
-
-function buildCodexPlannerPrompt(transcript: string) {
-  return [
-    "You are analyzing a full website preview image and a user transcript.",
-    "The image is the main visual source of truth. The transcript provides semantic intent.",
-    "Your task is NOT to build code. Your task is to produce a structured asset plan for reconstructing the page.",
-    "First infer one shared style language across all imagery on the page.",
-    "Then separate the page into:",
-    "- code_components: layout, typography, navigation, text panels, buttons, dividers, cards, forms, sidebars, footer, ornaments that should be implemented in code",
-    "- imagery_components: photos, illustrations, archival thumbnails, maps, posters, or other image-like regions that should be recreated with an image generation tool",
-    "Do NOT crop the preview. Look at the whole page and derive consistent prompts for each imagery component in the same shared visual language.",
-    "Use the preview literally. If the preview shows a man reading in an archive, describe that. If it shows a sepia crowd scene, an antique map, or a writing-at-desk scene, describe those directly.",
-    "Do not reinterpret obvious depicted subjects into abstract symbolism unless the preview itself is abstract.",
-    "If a strip or grid contains multiple distinct image thumbnails, treat each distinct thumbnail as its own imagery component, even when those thumbnails live inside reusable code cards.",
-    "If the page clearly contains a hero portrait plus several distinct editorial thumbnails, the imagery plan should normally include all of them.",
-    "The prompts must make all generated imagery feel like they belong to the same website.",
-    "The prompts should mention era, palette, medium, lighting, texture, and mood when relevant.",
-    "Do not include text overlays, labels, borders, UI chrome, signatures, or handwritten marks in the imagery prompts unless absolutely necessary.",
-    "Keep the number of imagery components reasonable and focused on real image-like regions only.",
-    "Prefer 4 to 6 imagery components for editorial pages with one hero image and multiple thumbnail images, unless the preview truly contains fewer image regions.",
-    "Use the transcript as semantic support:",
-    `"${transcript.trim()}"`,
-    "Return JSON only, following the provided schema."
-  ].join("\n");
-}
-
-export async function runWebsiteAssetPlanner(params: { previewImagePath: string; transcriptText: string }) {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "synk-asset-plan-"));
-  const promptPath = path.join(tempDir, "prompt.txt");
-  const schemaPath = path.join(tempDir, "schema.json");
-  const outputPath = path.join(tempDir, "plan.json");
-
-  try {
-    await writeFile(promptPath, buildCodexPlannerPrompt(params.transcriptText), "utf8");
-    await writeFile(schemaPath, JSON.stringify(getAssetPlanSchema(), null, 2), "utf8");
-
-    const args = [
-      "exec",
-      "--skip-git-repo-check",
-      "--ephemeral",
-      "-s",
-      "read-only",
-      "-C",
-      tempDir,
-      "-i",
-      params.previewImagePath,
-      "--output-schema",
-      schemaPath,
-      "--output-last-message",
-      outputPath,
-      "-"
-    ];
-
-    const prompt = await readFile(promptPath, "utf8");
-
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn("codex", args, {
-        cwd: process.cwd(),
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env
-        }
-      });
-
-      let stderr = "";
-      let stdout = "";
-
-      child.stdout.on("data", (chunk) => {
-        stdout += String(chunk);
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += String(chunk);
-      });
-
-      child.on("error", reject);
-      child.on("close", (code) => {
-        if (code !== 0) {
-          reject(new Error(`codex exec failed with code ${code}\n${stdout}\n${stderr}`));
-          return;
-        }
-        resolve();
-      });
-
-      child.stdin.write(prompt);
-      child.stdin.end();
-    });
-
-    return JSON.parse(await readFile(outputPath, "utf8")) as WebsiteAssetPlan;
-  } finally {
-    await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-  }
 }
 
 async function callResponsesApi(payload: object, apiKey: string) {
@@ -426,18 +268,8 @@ export function buildPreviewDrivenClonePrompt(params: {
   ].join("\n");
 }
 
-export async function writeTempPreviewFile(previewBuffer: Buffer, extension = ".png") {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "synk-preview-"));
-  const filePath = path.join(tempDir, `${randomUUID()}${extension}`);
-  await writeFile(filePath, previewBuffer);
-  return {
-    filePath,
-    cleanup: async () => {
-      await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
-    }
-  };
-}
-
 export function hasOpenAiApiKey() {
   return Boolean(process.env.OPENAI_API_KEY);
 }
+
+export type { WebsiteAssetPlan, WebsiteImageryComponent } from "@/lib/website-asset-plan";

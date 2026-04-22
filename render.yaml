@@ -15,6 +15,14 @@ services:
         sync: false
       - key: OPENAI_TRANSCRIBE_MODEL
         value: gpt-4o-mini-transcribe
+      - key: CODEX_AUTH_JSON_B64
+        sync: false
+      - key: VERCEL_TEAM_ID
+        sync: false
+      - key: VERCEL_PROJECT_ID
+        sync: false
+      - key: VERCEL_TOKEN
+        sync: false
       - key: OPENAI_SCENE_MODEL
         value: gpt-5.4
       - key: OPENAI_IMAGE_ORCHESTRATOR_MODEL

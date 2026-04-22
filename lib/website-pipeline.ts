@@ -11,16 +11,14 @@ import {
 import { getSessionAsset, getSessionDetail } from "@/lib/session-store";
 import { WebsiteJob } from "@/lib/types";
 import { requireWebsiteSandboxConfig } from "@/lib/website-config";
-import { runWebsiteSandboxJob } from "@/lib/website-sandbox";
+import { runWebsiteAssetPlanner, runWebsiteSandboxJob } from "@/lib/website-sandbox";
 import { readCodexAuthJson } from "@/lib/codex-auth";
 import {
   buildPreviewDrivenClonePrompt,
   createWebsitePlaceholderAssets,
   generateWebsiteImageryAssets,
   generateWebsitePreviewFromSketch,
-  hasOpenAiApiKey,
-  runWebsiteAssetPlanner,
-  writeTempPreviewFile
+  hasOpenAiApiKey
 } from "@/lib/website-preview-chain";
 
 const websiteJobRuns = new Map<string, Promise<WebsiteJob>>();
@@ -1320,75 +1318,70 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
         errorMessage: null
       }));
 
-      const tempPreview = await writeTempPreviewFile(generatedPreview.buffer);
       let result;
-      try {
-        const assetPlan = await runWebsiteAssetPlanner({
-          previewImagePath: tempPreview.filePath,
-          transcriptText: existingJob.transcriptText
-        });
+      const assetPlan = await runWebsiteAssetPlanner({
+        previewImageBuffer: generatedPreview.buffer,
+        transcriptText: existingJob.transcriptText
+      });
 
-        await updateWebsiteJob(sessionId, jobId, (current) => ({
-          ...current,
-          status: "running",
-          statusDetail:
-            maxAttempts > 1
-              ? `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation. (attempt ${attempt}/${maxAttempts})`
-              : `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation.`,
-          errorMessage: null
-        }));
+      await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation. (attempt ${attempt}/${maxAttempts})`
+            : `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation.`,
+        errorMessage: null
+      }));
 
-        const placeholderAssets = await createWebsitePlaceholderAssets(assetPlan);
-        const generatedAssetsPromise = generateWebsiteImageryAssets(assetPlan);
-        const clonePrompt = buildPreviewDrivenClonePrompt({
-          assetPlan,
-          generatedAssets: placeholderAssets.map((asset) => ({
-            component: asset.component,
-            fileName: asset.fileName
-          })),
-          assetDeliveryMode: "project-placeholder",
-          transcriptText: existingJob.transcriptText
-        });
+      const placeholderAssets = await createWebsitePlaceholderAssets(assetPlan);
+      const generatedAssetsPromise = generateWebsiteImageryAssets(assetPlan);
+      const clonePrompt = buildPreviewDrivenClonePrompt({
+        assetPlan,
+        generatedAssets: placeholderAssets.map((asset) => ({
+          component: asset.component,
+          fileName: asset.fileName
+        })),
+        assetDeliveryMode: "project-placeholder",
+        transcriptText: existingJob.transcriptText
+      });
 
-        const previewDrivenJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
-          ...current,
-          prompt: clonePrompt,
-          status: "running",
-          statusDetail:
-            maxAttempts > 1
-              ? `Recreating generated preview as a real website. (attempt ${attempt}/${maxAttempts})`
-              : "Recreating generated preview as a real website.",
-          errorMessage: null
-        }));
+      const previewDrivenJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        prompt: clonePrompt,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Recreating generated preview as a real website. (attempt ${attempt}/${maxAttempts})`
+            : "Recreating generated preview as a real website.",
+        errorMessage: null
+      }));
 
-        result = await runWebsiteSandboxJob({
-          job: previewDrivenJob,
-          includeSketchInputs: false,
-          referenceImages: [
-            {
-              fileName: "target-preview.png",
-              buffer: generatedPreview.buffer
-            }
-          ],
-          projectAssetSlots: placeholderAssets.map((asset) => ({
-            fileName: asset.fileName,
-            buffer: asset.buffer
-          })),
-          finalProjectAssetsPromise: generatedAssetsPromise,
-          onProgress: async ({ status, statusDetail, sandboxId }) => {
-            await updateWebsiteJob(sessionId, jobId, (current) => ({
-              ...current,
-              status,
-              sandboxId: sandboxId ?? current.sandboxId,
-              statusDetail:
-                maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail,
-              errorMessage: null
-            }));
+      result = await runWebsiteSandboxJob({
+        job: previewDrivenJob,
+        includeSketchInputs: false,
+        referenceImages: [
+          {
+            fileName: "target-preview.png",
+            buffer: generatedPreview.buffer
           }
-        });
-      } finally {
-        await tempPreview.cleanup();
-      }
+        ],
+        projectAssetSlots: placeholderAssets.map((asset) => ({
+          fileName: asset.fileName,
+          buffer: asset.buffer
+        })),
+        finalProjectAssetsPromise: generatedAssetsPromise,
+        onProgress: async ({ status, statusDetail, sandboxId }) => {
+          await updateWebsiteJob(sessionId, jobId, (current) => ({
+            ...current,
+            status,
+            sandboxId: sandboxId ?? current.sandboxId,
+            statusDetail:
+              maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail,
+            errorMessage: null
+          }));
+        }
+      });
 
       await saveWebsiteJobArtifact(sessionId, jobId, {
         kind: "codeArchive",

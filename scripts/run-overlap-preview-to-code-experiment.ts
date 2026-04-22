@@ -9,13 +9,13 @@ import { Sandbox } from "@vercel/sandbox";
 import {
   buildPreviewDrivenClonePrompt,
   generateWebsiteImageryAssets,
-  runWebsiteAssetPlanner,
   type WebsiteAssetPlan,
   type WebsiteImageryComponent,
   type WebsiteGeneratedAsset
 } from "../lib/website-preview-chain";
 import { readCodexAuthJson } from "../lib/codex-auth";
 import { getWebsitePreviewMimeType, normalizeWebsitePreviewAssetPath } from "../lib/website-artifacts";
+import { runWebsiteAssetPlanner } from "../lib/website-sandbox";
 
 const TEMPLATE_ROOT = path.join(process.cwd(), "templates", "website-vite-react");
 const SANDBOX_ROOT = "/vercel/sandbox";
@@ -630,10 +630,8 @@ async function main() {
 
   const totalStart = Date.now();
   const plannerStart = Date.now();
-  const tempPreviewPath = path.join(publicRoot, "input-preview.png");
-  await writeFile(tempPreviewPath, previewBuffer);
   const assetPlan = await runWebsiteAssetPlanner({
-    previewImagePath: tempPreviewPath,
+    previewImageBuffer: previewBuffer,
     transcriptText: transcript
   });
   const plannerMs = Date.now() - plannerStart;
