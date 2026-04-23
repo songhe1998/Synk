@@ -10,6 +10,7 @@ import {
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const IMAGE_ORCHESTRATOR_MODEL = process.env.OPENAI_IMAGE_ORCHESTRATOR_MODEL ?? "gpt-5.4";
 const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-2";
+const RESPONSES_TIMEOUT_MS = Number(process.env.OPENAI_RESPONSES_TIMEOUT_MS ?? 120000);
 
 export interface WebsiteGeneratedAsset {
   component: WebsiteImageryComponent;
@@ -126,6 +127,8 @@ async function callResponsesApi(payload: object, apiKey: string) {
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(`Responses API timed out after ${RESPONSES_TIMEOUT_MS}ms`)), RESPONSES_TIMEOUT_MS);
     try {
       const response = await fetch(RESPONSES_URL, {
         method: "POST",
@@ -133,8 +136,10 @@ async function callResponsesApi(payload: object, apiKey: string) {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: controller.signal
       });
+      clearTimeout(timeout);
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -154,8 +159,11 @@ async function callResponsesApi(payload: object, apiKey: string) {
         return response.json();
       }
     } catch (error) {
+      clearTimeout(timeout);
       const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       const retryable =
+        message.includes("timed out") ||
+        message.includes("abort") ||
         message.includes("econnreset") ||
         message.includes("fetch failed") ||
         message.includes("connection termination") ||

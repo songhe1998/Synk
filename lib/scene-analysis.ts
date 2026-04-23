@@ -25,6 +25,7 @@ const FAST_IMAGE_ORCHESTRATOR_MODEL =
 const IMAGE_TOOL_MODEL = process.env.OPENAI_IMAGE_TOOL_MODEL ?? "gpt-image-2";
 const FAST_IMAGE_TOOL_MODEL = process.env.OPENAI_FAST_IMAGE_TOOL_MODEL ?? "gpt-image-1-mini";
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
+const RESPONSES_TIMEOUT_MS = Number(process.env.OPENAI_RESPONSES_TIMEOUT_MS ?? 120000);
 const SKETCH_BACKGROUND = "#fff8e6";
 
 interface ExtractedSceneObject {
@@ -280,21 +281,28 @@ function buildImageSourceInstruction(
 }
 
 async function callResponsesApi(payload: object, apiKey: string) {
-  const response = await fetch(RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error(`Responses API timed out after ${RESPONSES_TIMEOUT_MS}ms`)), RESPONSES_TIMEOUT_MS);
+  try {
+    const response = await fetch(RESPONSES_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+    }
+
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
   }
-
-  return response.json();
 }
 
 function extractOutputText(payload: any) {
