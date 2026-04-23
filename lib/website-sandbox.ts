@@ -12,6 +12,7 @@ import {
   getWebsiteAssetPlanSchema
 } from "@/lib/website-asset-plan";
 import type { WebsiteGeneratedAsset } from "@/lib/website-preview-chain";
+import { buildWebsiteScaffoldOverrides, type WebsiteScaffoldFile } from "@/lib/website-scaffold";
 
 const TEMPLATE_ROOT = path.join(process.cwd(), "templates", "website-vite-react");
 const SANDBOX_ROOT = "/vercel/sandbox";
@@ -37,6 +38,10 @@ const SANDBOX_COMMAND_WAIT_SLICE_MS = 10 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
 const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || null;
 const WEBSITE_CODEX_REASONING_EFFORT = process.env.WEBSITE_CODEX_REASONING_EFFORT?.trim() || "medium";
+const WEBSITE_CODEX_CODEGEN_REASONING_EFFORT =
+  process.env.WEBSITE_CODEX_CODEGEN_REASONING_EFFORT?.trim() || WEBSITE_CODEX_REASONING_EFFORT;
+const WEBSITE_CODEX_PLANNER_REASONING_EFFORT =
+  process.env.WEBSITE_CODEX_PLANNER_REASONING_EFFORT?.trim() || WEBSITE_CODEX_REASONING_EFFORT;
 const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
 const SNAPSHOT_CACHE_PATH = path.join(process.cwd(), ".cache", "website-sandbox-snapshot.json");
 
@@ -54,6 +59,8 @@ interface WebsiteSandboxSnapshotCache {
 export interface WebsiteSandboxRunInput {
   job: WebsiteJob;
   includeSketchInputs?: boolean;
+  designSpecContent?: string;
+  scaffoldOverrideFiles?: WebsiteScaffoldFile[];
   referenceImages?: Array<{
     fileName: string;
     buffer: Buffer;
@@ -369,12 +376,15 @@ async function readPreviewFiles(sandbox: Sandbox) {
 
 async function createWorkspaceFiles(
   job: WebsiteJob,
+  designSpecContent?: string,
+  scaffoldOverrideFiles: WebsiteScaffoldFile[] = [],
   referenceImages: Array<{
     fileName: string;
     buffer: Buffer;
   }> = []
 ) {
   const templateFiles = await getTemplateFiles();
+  const scaffoldOverrides = buildWebsiteScaffoldOverrides(job);
   const authJson = await readCodexAuthJson();
   const inputJson = JSON.stringify(
     {
@@ -394,12 +404,24 @@ async function createWorkspaceFiles(
     2
   );
 
+  const overrideByPath = new Map<string, Buffer>();
+  for (const file of scaffoldOverrides.files) {
+    overrideByPath.set(file.relativePath, file.buffer);
+  }
+  for (const file of scaffoldOverrideFiles) {
+    overrideByPath.set(file.relativePath, file.buffer);
+  }
+
   const workspaceFiles = templateFiles.map((file) => ({
     path: `${PROJECT_DIR}/${file.relativePath}`,
-    content: file.buffer
+    content: overrideByPath.get(file.relativePath) ?? file.buffer
   }));
 
   const inputFiles = [
+    {
+      path: `${PROJECT_DIR}/DESIGN.md`,
+      content: Buffer.from(designSpecContent ?? "No additional design spec was provided for this run.", "utf8")
+    },
     {
       path: `${INPUT_DIR}/transcript.txt`,
       content: Buffer.from(job.transcriptText, "utf8")
@@ -432,13 +454,18 @@ function shellEscape(value: string) {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
-function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], logPath?: string) {
+function buildCodexShellCommand(
+  promptPath: string,
+  imagePaths: string[] = [],
+  logPath?: string,
+  reasoningEffort = WEBSITE_CODEX_CODEGEN_REASONING_EFFORT
+) {
   const imageArgs = imagePaths
     .map((imagePath) => `-i ${shellEscape(imagePath)}`)
     .join(" ");
   const commonArgs = [
     WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
-    `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_REASONING_EFFORT}"`)}`,
+    `-c ${shellEscape(`model_reasoning_effort="${reasoningEffort}"`)}`,
     "--color never",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
@@ -465,7 +492,7 @@ function buildCodexShellCommand(promptPath: string, imagePaths: string[] = [], l
 function buildCodexPlannerShellCommand(previewImagePath: string, logPath?: string) {
   const commonArgs = [
     WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
-    `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_REASONING_EFFORT}"`)}`,
+    `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_PLANNER_REASONING_EFFORT}"`)}`,
     "--skip-git-repo-check",
     "--ephemeral",
     "-s",
@@ -594,9 +621,49 @@ function appendFailureContext(error: unknown, label: string, details: string | n
   return new Error(`${message}\n\n${label}:\n${details}`);
 }
 
+async function installAndBuildWebsiteProject(sandbox: Sandbox) {
+  let initialBuildError: Error | null = null;
+
+  try {
+    await runSandboxCommand(sandbox, {
+      cmd: "npm",
+      args: ["run", "build"],
+      cwd: PROJECT_DIR,
+      env: buildRunEnvironment(),
+      label: "Building generated website"
+    });
+    return;
+  } catch (error) {
+    initialBuildError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  await runSandboxCommand(sandbox, {
+    cmd: "npm",
+    args: ["install"],
+    cwd: PROJECT_DIR,
+    env: buildRunEnvironment(),
+    label: "Installing website dependencies"
+  });
+
+  try {
+    await runSandboxCommand(sandbox, {
+      cmd: "npm",
+      args: ["run", "build"],
+      cwd: PROJECT_DIR,
+      env: buildRunEnvironment(),
+      label: "Building generated website"
+    });
+  } catch (error) {
+    const retriedMessage = error instanceof Error ? error.message : String(error);
+    throw new Error(`${initialBuildError.message}\n\nRetry after npm install also failed:\n${retriedMessage}`);
+  }
+}
+
 export async function runWebsiteSandboxJob({
   job,
   includeSketchInputs = true,
+  designSpecContent,
+  scaffoldOverrideFiles = [],
   referenceImages = [],
   projectAssetSlots = [],
   finalProjectAssetsPromise,
@@ -629,7 +696,7 @@ export async function runWebsiteSandboxJob({
       sandboxId: sandbox.sandboxId
     });
 
-    const workspaceFiles = await createWorkspaceFiles(job, referenceImages);
+    const workspaceFiles = await createWorkspaceFiles(job, designSpecContent, scaffoldOverrideFiles, referenceImages);
     const sketchFiles = includeSketchInputs
       ? await Promise.all(
           job.pages.map(async (page, index) => {
@@ -709,25 +776,11 @@ export async function runWebsiteSandboxJob({
 
     await onProgress?.({
       status: "building",
-      statusDetail: "Installing dependencies and building the website.",
+      statusDetail: "Building the website with cached dependencies and only installing packages if the generated project truly needs them.",
       sandboxId: sandbox.sandboxId
     });
 
-    await runSandboxCommand(sandbox, {
-      cmd: "npm",
-      args: ["install"],
-      cwd: PROJECT_DIR,
-      env: buildRunEnvironment(),
-      label: "Installing website dependencies"
-    });
-
-    await runSandboxCommand(sandbox, {
-      cmd: "npm",
-      args: ["run", "build"],
-      cwd: PROJECT_DIR,
-      env: buildRunEnvironment(),
-      label: "Building generated website"
-    });
+    await installAndBuildWebsiteProject(sandbox);
 
     try {
       await ensureStyledBuild(sandbox);

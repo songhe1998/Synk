@@ -123,21 +123,54 @@ export async function generateWebsitePreviewFromSketch(params: {
 }
 
 async function callResponsesApi(payload: object, apiKey: string) {
-  const response = await fetch(RESPONSES_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(payload)
-  });
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const error = new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+        const lower = error.message.toLowerCase();
+        const retryable =
+          response.status === 429 ||
+          response.status >= 500 ||
+          lower.includes("connection termination") ||
+          lower.includes("upstream connect error") ||
+          lower.includes("reset");
+        if (!retryable || attempt === 3) {
+          throw error;
+        }
+        lastError = error;
+      } else {
+        return response.json();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const retryable =
+        message.includes("econnreset") ||
+        message.includes("fetch failed") ||
+        message.includes("connection termination") ||
+        message.includes("upstream connect error") ||
+        message.includes("network");
+      if (!retryable || attempt === 3) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
   }
 
-  return response.json();
+  throw lastError ?? new Error("OpenAI Responses API failed without a response.");
 }
 
 function resolveGeneratedImageSize(aspectRatio: WebsiteImageryComponent["aspect_ratio"]) {
@@ -221,6 +254,7 @@ export function buildPreviewDrivenClonePrompt(params: {
   generatedAssets: Array<{ component: WebsiteImageryComponent; fileName: string }>;
   transcriptText: string;
   assetDeliveryMode?: "input" | "project-placeholder";
+  scaffoldFamily?: "editorial" | "product" | "marketing";
 }) {
   const assetDeliveryMode = params.assetDeliveryMode ?? "input";
   const assetLines = params.generatedAssets.map(({ component, fileName }) =>
@@ -233,17 +267,32 @@ export function buildPreviewDrivenClonePrompt(params: {
     "Build a real responsive website in this Vite + React + TypeScript workspace.",
     "The primary visual source of truth is /vercel/sandbox/input/target-preview.png.",
     "The user transcript provides semantic intent. There is no sketch for this task.",
-    "Recreate the target preview as closely as possible in code.",
-    "This is a fidelity task, not an inspiration task.",
-    "Build a complete usable website experience, not just a pretty dead-end mock.",
-    "All visible copy must read like end-user-facing website content, not an explanation of the design process.",
-    "Never write visible text about the request, prompt, preview, wireframe, composition, placeholders, fidelity, layout, implementation choices, or why the page was built a certain way.",
-    "Do not let phrases like 'the composition', 'the original request', 'the preview', 'placeholder', 'hero remains', 'landing page instead of', or similar meta commentary appear in the final rendered site.",
-    "Choose the most natural information architecture for the preview and transcript.",
-    "If the design reads like a narrative landing page or single story surface, section navigation can be correct.",
-    "If the design implies distinct destinations such as Essays, Lectures, About, Contact, Pricing, Settings, Dashboard subsections, archives, or detail pages, prefer real routed pages over stretching everything into one unnaturally long homepage.",
+    "Read DESIGN.md first. It contains the design system, shell style, section blueprint, and primitive guidance for this run.",
+    "Recreate the target preview closely in code. This is a fidelity task, not an inspiration task.",
+    "Start from the prepared scaffold and edit it toward fidelity rather than rebuilding the project from zero.",
+    "Reuse and adapt components from src/ui/primitives.tsx before inventing new structural patterns.",
+    "Keep the implementation compact and focused. Do not create planning docs, scratch files, or long notes in the workspace.",
+    "Only change files that are necessary for the final site. Prefer src/App.tsx and src/styles.css unless real routes are clearly required.",
+    "All visible copy must read like end-user-facing website content.",
+    "Never show meta language about the request, prompt, preview, wireframe, placeholders, fidelity, or implementation choices.",
+    "Follow the route strategy and section blueprint from DESIGN.md unless the preview clearly forces a different structure.",
+    params.scaffoldFamily
+      ? `A ${params.scaffoldFamily} scaffold has already been prepared in the workspace. Keep its shell and primitives unless the preview clearly requires a different structure.`
+      : "A scaffold is already prepared in the workspace. Keep its shell and primitives unless the preview clearly requires a different structure.",
     "Every visible navigation item, CTA, teaser card, and footer link should do something meaningful in the built site.",
     "Dead links, href=\"#\", and buttons with no effect are not acceptable.",
+    "If a primitive in src/ui/primitives.tsx already matches the needed shell, panel, badge, nav, metric, or toolbar behavior, use it and adjust it instead of rebuilding that pattern from raw divs.",
+    "Do not add or change npm dependencies unless they are absolutely necessary. Prefer pure React and CSS with the packages already installed in the workspace.",
+    params.scaffoldFamily === "product"
+      ? "For product UI, prefer a compact static interface over a simulated app platform. Do not invent extra tabs, view modes, pseudo-pages, or large mock data systems unless the preview explicitly shows them."
+      : "Keep the implementation focused. Only add complexity that is clearly visible in the preview.",
+    "Keep file edits tightly scoped and avoid unnecessary new files.",
+    params.scaffoldFamily === "product"
+      ? "Avoid large navigation registries, icon registries, and many state hooks. Use at most one or two tiny local interactions when they are obvious in the preview."
+      : "Use local interactions sparingly and only when they strengthen fidelity.",
+    params.scaffoldFamily === "product"
+      ? "Keep the implementation compact: one main page component, one stylesheet, small data arrays, and no sprawling pseudo-application architecture."
+      : "Keep the implementation compact and let the visual composition do the work.",
     "Use CSS and layout code to match the page shell, typography, spacing, borders, paper tone, rounded panels, dividers, icons, and CTA treatment.",
     "Use the supplied generated imagery components directly in the final site for the hero image and image-like content slots instead of trying to redraw those image regions in CSS or SVG.",
     "Do not paste the target preview image as one giant screenshot or background.",
@@ -251,15 +300,13 @@ export function buildPreviewDrivenClonePrompt(params: {
     assetDeliveryMode === "project-placeholder"
       ? "Do not generate additional image assets yourself in this coding pass. The imagery asset slots already exist in the project and must be used directly."
       : "Do not create substitute imagery in CSS or SVG when a supplied generated image already covers that slot.",
-    "Before major edits, create a short design-plan.md with: fidelity thesis, component list, and any unavoidable deviations. Keep that planning private inside the workspace; none of it may appear in user-visible copy.",
     "Shared imagery style language:",
     params.assetPlan.shared_style_language,
     params.generatedAssets.length ? "Generated imagery components to use:" : "No separate preview-matched imagery components were identified. Implement all visible regions directly in code.",
     ...assetLines,
-    "Verbatim user transcript:",
-    `"${params.transcriptText}"`,
     "Inputs:",
     "- /vercel/sandbox/input/target-preview.png",
+    "- /vercel/sandbox/input/transcript.txt",
     ...(assetDeliveryMode === "input"
       ? params.generatedAssets.map(({ fileName }) => `- /vercel/sandbox/input/${fileName}`)
       : []),

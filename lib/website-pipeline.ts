@@ -1,5 +1,6 @@
 import { ensureSessionAnalysis } from "@/lib/session-pipeline";
 import { buildDisplayTranscript } from "@/lib/transcript-format";
+import { buildWebsiteDesignSpec } from "@/lib/website-design-spec";
 import {
   createWebsiteJob,
   getWebsiteJob,
@@ -20,6 +21,12 @@ import {
   generateWebsitePreviewFromSketch,
   hasOpenAiApiKey
 } from "@/lib/website-preview-chain";
+import {
+  buildWebsiteBlueprintOverrides,
+  inferWebsiteScaffoldFamily,
+  inferWebsiteScaffoldVariant
+} from "@/lib/website-scaffold";
+import type { WebsiteAssetPlan } from "@/lib/website-asset-plan";
 
 const websiteJobRuns = new Map<string, Promise<WebsiteJob>>();
 
@@ -1270,6 +1277,116 @@ function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function shouldUseCodeOnlyProductFastPath(transcriptText: string) {
+  if (process.env.WEBSITE_FAST_PRODUCT_CODE_ONLY !== "1") {
+    return false;
+  }
+
+  return inferWebsiteScaffoldFamily(transcriptText) === "product";
+}
+
+function shouldUsePreviewProductCodeOnlyPath(transcriptText: string) {
+  if (process.env.WEBSITE_PREVIEW_PRODUCT_CODE_ONLY !== "1") {
+    return false;
+  }
+
+  return inferWebsiteScaffoldFamily(transcriptText) === "product";
+}
+
+function shouldUsePreviewBlueprintScaffold(transcriptText: string) {
+  if (process.env.WEBSITE_PREVIEW_BLUEPRINT_SCAFFOLD !== "1") {
+    return false;
+  }
+
+  return inferWebsiteScaffoldFamily(transcriptText) === "product";
+}
+
+function shouldUseDirectProductFastPath(transcriptText: string) {
+  if (process.env.WEBSITE_FAST_PRODUCT_DIRECT !== "1") {
+    return false;
+  }
+
+  return inferWebsiteScaffoldFamily(transcriptText) === "product";
+}
+
+function buildCodeOnlyProductAssetPlan(transcriptText: string): WebsiteAssetPlan {
+  return {
+    shared_style_language: [
+      "Refined product UI aesthetic with crisp information hierarchy, restrained neutral surfaces, subtle panel depth, clean utility typography, and graphics expressed through code rather than separate generated images.",
+      "If the page needs an identity marker, use a minimal avatar, monogram, or geometric placeholder built in code instead of an external image unless a real portrait is absolutely necessary.",
+      `Transcript intent: ${transcriptText.trim()}`
+    ].join(" "),
+    route_strategy: "single-page",
+    shell_style: "Dense product shell with a persistent navigation rail, a compact command surface, and operational panels that feel deliberate rather than generic.",
+    primary_sections: [
+      {
+        name: "Shell",
+        purpose: "Persistent app frame, nav, and command context.",
+        emphasis: "primary"
+      },
+      {
+        name: "Primary surface",
+        purpose: "Main dashboard or settings workspace.",
+        emphasis: "primary"
+      },
+      {
+        name: "Support rail",
+        purpose: "Secondary controls, alerts, or supporting notes.",
+        emphasis: "supporting"
+      }
+    ],
+    priority_primitives: ["SidebarNav", "SectionTitle", "SurfacePanel", "MetricTile", "StatusPill"],
+    implementation_notes: [
+      "Reuse the prepared product scaffold instead of rebuilding the project shell.",
+      "Favor compact static UI and avoid pseudo-app sprawl.",
+      "Keep visible hierarchy strong in the first viewport."
+    ],
+    code_components: [
+      {
+        name: "Full product surface",
+        role: "Implement the entire dashboard/settings/product interface in code using the existing scaffold.",
+        rationale: "This page type is primarily structured UI, so separate preview-matched imagery is optional rather than required."
+      }
+    ],
+    imagery_components: []
+  };
+}
+
+function buildDirectProductClonePrompt(transcriptText: string) {
+  const scaffoldVariant = inferWebsiteScaffoldVariant(transcriptText);
+  const variantInstruction =
+    scaffoldVariant === "product-dashboard"
+      ? "This is an operations/dashboard product surface. Keep high information density, multiple operational zones visible at once, and a real control-board feel."
+      : "This is a settings/account product surface. Keep the page focused, clear, and grouped around real controls rather than generic feature marketing.";
+
+  return [
+    "Build a real responsive website in this Vite + React + TypeScript workspace.",
+    "This is a direct product wireframe task. There is no generated preview image for this run.",
+    "The labeled sketch and user transcript are the visual and semantic source of truth.",
+    "Read DESIGN.md before editing code. Treat it as the design system for this run.",
+    "Reuse and adapt components from src/ui/primitives.tsx before inventing a new component system.",
+    "A product scaffold has already been prepared in the workspace. Start from that scaffold and edit it toward fidelity instead of rebuilding the project from zero.",
+    variantInstruction,
+    "Prefer editing src/App.tsx and src/styles.css in place. Only add files or routes when the sketch clearly requires them.",
+    "Do not add or change npm dependencies. Use only React, TypeScript, and CSS already present in the workspace.",
+    "Do not invent extra pseudo-pages, oversized nav systems, heavy mock data models, or many state hooks.",
+    "Prefer a compact static interface over a simulated app platform. Use at most one or two tiny local interactions if the sketch clearly implies them.",
+    "Translate sketch boxes into a polished product interface with clear hierarchy, spacing, panels, rails, charts, and controls.",
+    "If a primitive in src/ui/primitives.tsx already fits the need, use it and refine it rather than rebuilding from raw divs.",
+    "Use code and CSS for maps, charts, avatars, and utility graphics instead of expecting external generated imagery.",
+    "All visible copy must read like real end-user UI text, not implementation notes.",
+    "Dead links, href=\"#\", and inert controls are not acceptable.",
+    "Keep the page buildable with `npm run build`.",
+    "Verbatim user transcript:",
+    `"${transcriptText.trim()}"`,
+    "Inputs:",
+    "- /vercel/sandbox/input/transcript.txt",
+    "- /vercel/sandbox/input/input.json",
+    "- /vercel/sandbox/input/page-1-labeled-sketch.png",
+    "Implement the main experience at route /."
+  ].join("\n");
+}
+
 async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
   const existingJob = await getWebsiteJob(sessionId, jobId);
   if (!existingJob) {
@@ -1280,6 +1397,72 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      const directProductFastPath = shouldUseDirectProductFastPath(existingJob.transcriptText);
+      if (directProductFastPath) {
+        const directPrompt = buildDirectProductClonePrompt(existingJob.transcriptText);
+        const directDesignSpec = buildWebsiteDesignSpec({
+          job: existingJob,
+          mode: "direct"
+        });
+        const directJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          prompt: directPrompt,
+          status: "running",
+          statusDetail:
+            maxAttempts > 1
+              ? `Recreating labeled sketch directly as product UI. (attempt ${attempt}/${maxAttempts})`
+              : "Recreating labeled sketch directly as product UI.",
+          errorMessage: null
+        }));
+
+        const directResult = await runWebsiteSandboxJob({
+          job: directJob,
+          includeSketchInputs: true,
+          designSpecContent: directDesignSpec,
+          referenceImages: [],
+          projectAssetSlots: [],
+          onProgress: async ({ status, statusDetail, sandboxId }) => {
+            await updateWebsiteJob(sessionId, jobId, (current) => ({
+              ...current,
+              status,
+              sandboxId: sandboxId ?? current.sandboxId,
+              statusDetail:
+                maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail,
+              errorMessage: null
+            }));
+          }
+        });
+
+        await saveWebsiteJobArtifact(sessionId, jobId, {
+          kind: "codeArchive",
+          ...directResult.codeArchive
+        });
+        await saveWebsiteJobArtifact(sessionId, jobId, {
+          kind: "distArchive",
+          ...directResult.distArchive
+        });
+        await saveWebsitePreviewFiles(
+          sessionId,
+          jobId,
+          directResult.previewFiles.map((file) => ({
+            assetPath: file.assetPath,
+            buffer: file.buffer
+          }))
+        );
+
+        return updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          status: "succeeded",
+          sandboxId: directResult.sandboxId,
+          completedAt: new Date().toISOString(),
+          errorMessage: null,
+          statusDetail:
+            maxAttempts > 1
+              ? `Website preview is ready. Completed on attempt ${attempt}.`
+              : "Website preview is ready."
+        }));
+      }
+
       await updateWebsiteJob(sessionId, jobId, (current) => ({
         ...current,
         status: "running",
@@ -1322,23 +1505,35 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
       }));
 
       let result;
-      const assetPlan = await runWebsiteAssetPlanner({
-        previewImageBuffer: generatedPreview.buffer,
-        transcriptText: existingJob.transcriptText
-      });
+      const codeOnlyProductFastPath = shouldUseCodeOnlyProductFastPath(existingJob.transcriptText);
+      const previewProductCodeOnlyPath = shouldUsePreviewProductCodeOnlyPath(existingJob.transcriptText);
+      const assetPlan = codeOnlyProductFastPath || previewProductCodeOnlyPath
+        ? buildCodeOnlyProductAssetPlan(existingJob.transcriptText)
+        : await runWebsiteAssetPlanner({
+            previewImageBuffer: generatedPreview.buffer,
+            transcriptText: existingJob.transcriptText
+          });
 
       await updateWebsiteJob(sessionId, jobId, (current) => ({
         ...current,
         status: "running",
         statusDetail:
           maxAttempts > 1
-            ? `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation. (attempt ${attempt}/${maxAttempts})`
-            : `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation.`,
+            ? `${
+                codeOnlyProductFastPath || previewProductCodeOnlyPath
+                  ? "Using code-only product fast path and skipping preview-matched imagery generation."
+                  : `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation.`
+              } (attempt ${attempt}/${maxAttempts})`
+            : codeOnlyProductFastPath || previewProductCodeOnlyPath
+              ? "Using code-only product fast path and skipping preview-matched imagery generation."
+              : `Planning ${assetPlan.imagery_components.length} preview-matched imagery slot(s) and starting overlap generation.`,
         errorMessage: null
       }));
 
-      const placeholderAssets = await createWebsitePlaceholderAssets(assetPlan);
-      const generatedAssetsPromise = generateWebsiteImageryAssets(assetPlan);
+      const placeholderAssets = codeOnlyProductFastPath || previewProductCodeOnlyPath ? [] : await createWebsitePlaceholderAssets(assetPlan);
+      const generatedAssetsPromise = codeOnlyProductFastPath || previewProductCodeOnlyPath
+        ? Promise.resolve([])
+        : generateWebsiteImageryAssets(assetPlan);
       const clonePrompt = buildPreviewDrivenClonePrompt({
         assetPlan,
         generatedAssets: placeholderAssets.map((asset) => ({
@@ -1346,8 +1541,24 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
           fileName: asset.fileName
         })),
         assetDeliveryMode: "project-placeholder",
-        transcriptText: existingJob.transcriptText
+        transcriptText: existingJob.transcriptText,
+        scaffoldFamily: inferWebsiteScaffoldFamily(existingJob.transcriptText)
       });
+      const designSpec = buildWebsiteDesignSpec({
+        job: existingJob,
+        mode: "preview-first",
+        assetPlan
+      });
+      const blueprintOverrides = shouldUsePreviewBlueprintScaffold(existingJob.transcriptText)
+        ? buildWebsiteBlueprintOverrides({
+            job: existingJob,
+            assetPlan,
+            generatedAssets: placeholderAssets.map((asset) => ({
+              component: asset.component,
+              fileName: asset.fileName
+            }))
+          })
+        : null;
 
       const previewDrivenJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
         ...current,
@@ -1363,6 +1574,8 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
       result = await runWebsiteSandboxJob({
         job: previewDrivenJob,
         includeSketchInputs: false,
+        designSpecContent: designSpec,
+        scaffoldOverrideFiles: blueprintOverrides?.files,
         referenceImages: [
           {
             fileName: "target-preview.png",

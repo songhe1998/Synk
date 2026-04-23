@@ -6,6 +6,8 @@ Core requirements:
 - Keep the site responsive and buildable.
 - Ensure `npm run build` succeeds before finishing.
 - Do not read or write outside this project directory.
+- Read `DESIGN.md` before changing code. Treat it as the persistent design system for the run.
+- Reuse and adapt the components in `src/ui/primitives.tsx` before inventing a new component system.
 - Build a usable website, not a dead-end mock.
 - All visible copy must read like end-user-facing site content, not internal implementation notes.
 - Never let rendered text mention the request, prompt, preview, wireframe, composition, placeholders, fidelity, layout decisions, or why the page was built a certain way.
@@ -31,6 +33,7 @@ Typography and styling:
 - Prefer distinctive typography and a coherent type hierarchy.
 - Use CSS variables for the main visual system.
 - Keep a real global stylesheet wired into the app; do not ship browser-default HTML because a stylesheet import was dropped.
+- Prefer adapting the shared primitives and token system over writing one-off shells for every page.
 - Use `clamp()` for major type sizing where useful.
 - Keep spacing rhythm and contrast polished.
 - Prefer lower text density than your first instinct: fewer paragraphs, more hierarchy, more breathing room, less equal-weight copy everywhere.
