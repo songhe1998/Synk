@@ -21,7 +21,7 @@ import { normalizeSupabaseError } from "@/lib/supabase/errors";
 
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
-const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
+const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
 
 interface UploadPayload {
   audioBuffer: Buffer;

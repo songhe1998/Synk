@@ -272,11 +272,11 @@ function buildImageSourceInstruction(
       : "";
 
   if (source === "labeled") {
-    return `${renderGuardrail} Use the sketch lines and nearby labels only as layout and identity hints. Do not include any labels, text, dots, guide lines, or callout lines in the final image.`
+    return `${renderGuardrail} Use the sketch lines and nearby labels as composition and identity hints. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes. If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for a named object, render the intended object naturally rather than preserving primitive geometry. Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, or when the transcript explicitly asks for precise shapes. Do not include any labels, text, dots, guide lines, or callout lines in the final image.`
       .trim();
   }
 
-  return `${renderGuardrail} Use the plain sketch lines and their relative positions as layout hints. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.`
+  return `${renderGuardrail} Use the plain sketch lines and their relative positions as composition hints. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes. If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for an intended object, render the intended object naturally rather than preserving primitive geometry. Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, or when the spoken prompt explicitly asks for precise shapes. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.`
     .trim();
 }
 
@@ -330,7 +330,10 @@ Rules:
 - Put background, style, relationships, and story/mood into global_info.
 - Infer the intended visual style from the transcript itself. Use explicit style requests when they exist, and otherwise infer a fitting finished-image style from the user's wording, mood, subject matter, and descriptive cues.
 - If the transcript does not provide meaningful style cues, keep the style natural and neutral rather than forcing a named style.
-- Write generation_prompt as a natural paragraph for a finished image that follows the sketch layout and labels closely. The prompt should describe the intended final image style, whether explicitly requested or reasonably inferred from the transcript.
+- Write generation_prompt as a natural paragraph for a finished image that preserves the intended composition, object relationships, and framing from the sketch, but does not assume rough sketch geometry is final geometry.
+- By default, treat circles, ovals, rectangles, arrows, and rough blobs in the sketch as placeholder blocking for intended objects rather than final contours.
+- Only imply strict geometric fidelity when the transcript clearly calls for geometric, symbolic, diagrammatic, logo-like, interface-like, or otherwise shape-driven forms.
+- The prompt should describe the intended final image style, whether explicitly requested or reasonably inferred from the transcript.
 `.trim();
 
 export async function extractSceneFromTranscript(
@@ -549,7 +552,7 @@ export function groundSceneExtraction({
     transcriptText: buildDisplayTranscript(transcript),
     objects,
     globalInfo: extraction.global_info,
-    generationPrompt: `${extraction.generation_prompt.trim()} Follow the provided labeled sketch closely. Treat each label tag as the identity of the nearby object and preserve the overall layout. The label tags, callout lines, and any sketch annotations are only guidance and must not appear in the final rendered image.`,
+    generationPrompt: `${extraction.generation_prompt.trim()} Use the provided labeled sketch as a composition guide, not a tracing target. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing. Decide whether each sketched shape is literal or only placeholder blocking. If the transcript clearly implies geometric, symbolic, diagrammatic, logo-like, interface-like, or otherwise shape-driven forms, follow that shape more strictly. Otherwise, transform rough circles, ovals, rectangles, arrows, and blobs into natural final silhouettes or structures for the intended objects. Treat each label tag as the identity of the nearby object. The label tags, callout lines, and any sketch annotations are only guidance and must not appear in the final rendered image.`,
     notes: [
       `Scene understanding generated with ${extractionModel}.`,
       `Objects grounded against ${clusters.length} stroke clusters.`

@@ -42,7 +42,7 @@ const MAX_SESSIONS = 8;
 const GALLERY_SESSION_LIMIT = 8;
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
-const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
+const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
 
 interface SessionMeta extends SessionSummary {}
 

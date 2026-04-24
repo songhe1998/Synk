@@ -206,7 +206,7 @@ export function RecorderShell({
   const createSessionConfigRef = useRef({
     analysisReasoningEffort: "medium" as AnalysisReasoningEffort,
     imageSizePreset: "medium" as ImageSizePreset,
-    imageGenerationProfile: "pro" as ImageGenerationProfile
+    imageGenerationProfile: "fast" as ImageGenerationProfile
   });
   const canListenRef = useRef(!(authEnabled && !viewer));
   const galleryNoticeTimeoutRef = useRef<number | null>(null);
@@ -214,7 +214,7 @@ export function RecorderShell({
   const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
-  const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("pro");
+  const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("fast");
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [outputTarget, setOutputTarget] = useState<OutputTarget>("image");
@@ -1741,8 +1741,8 @@ export function RecorderShell({
                   </div>
                   <p className="recorder-settings-copy">
                     {imageGenerationProfile === "fast"
-                      ? "Fast uses GPT-5.4 mini plus GPT Image 1 mini, with inferred style, low-fidelity editing, and a square 1024 pass to cut latency and cost."
-                      : "Pro uses GPT-5.4 plus GPT Image 1.5, with the same inferred-style scene analysis and a higher-fidelity image pass for stronger final quality."}
+                      ? "Fast uses GPT-5.4 mini plus GPT Image 1 mini, low image quality, low-fidelity editing, and a fixed 1024 square pass to cut latency and cost."
+                      : "Pro uses GPT-5.4 plus GPT Image 1.5, medium image quality, the same inferred-style scene analysis, and a higher-fidelity image pass for stronger final quality."}
                   </p>
                 </section>
 
@@ -1780,7 +1780,7 @@ export function RecorderShell({
                   </div>
                   {imageGenerationProfile === "fast" ? (
                     <p className="recorder-settings-copy">
-                      Fast uses a fixed 1024 square image pass to keep generation lean.
+                      Fast locks image generation to low quality and a fixed 1024 square pass to keep generation lean.
                     </p>
                   ) : null}
                 </section>
