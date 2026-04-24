@@ -1,7 +1,12 @@
 import { requireApiViewer } from "@/lib/auth-route";
 import { createSession } from "@/lib/session-store";
 import { normalizeSupabaseError } from "@/lib/supabase/errors";
-import { AnalysisReasoningEffort, ImageGenerationProfile, ImageSizePreset } from "@/lib/types";
+import {
+  AnalysisReasoningEffort,
+  ImageFollowMode,
+  ImageGenerationProfile,
+  ImageSizePreset
+} from "@/lib/types";
 import { NextRequest, NextResponse } from "next/server";
 
 function parseReasoningEffort(value: unknown): AnalysisReasoningEffort | undefined {
@@ -22,6 +27,10 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
   return undefined;
 }
 
+function parseImageFollowMode(value: unknown): ImageFollowMode | undefined {
+  return value === "auto" || value === "loose" || value === "close" ? value : undefined;
+}
+
 export async function POST(request: NextRequest) {
   const { viewer, response } = await requireApiViewer("/");
   if (response) {
@@ -36,7 +45,8 @@ export async function POST(request: NextRequest) {
       {
         analysisReasoningEffort: parseReasoningEffort(payload?.analysisReasoningEffort),
         imageSizePreset: parseImageSizePreset(payload?.imageSizePreset),
-        imageGenerationProfile: parseImageGenerationProfile(payload?.imageGenerationProfile)
+        imageGenerationProfile: parseImageGenerationProfile(payload?.imageGenerationProfile),
+        imageFollowMode: parseImageFollowMode(payload?.imageFollowMode)
       },
       viewer?.id
     );

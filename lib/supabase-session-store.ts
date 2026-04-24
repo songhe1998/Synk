@@ -3,6 +3,7 @@ import {
   AnalysisReasoningEffort,
   AssetKind,
   DrawingEvent,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
   SceneAnalysis,
@@ -22,6 +23,7 @@ import { normalizeSupabaseError } from "@/lib/supabase/errors";
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
 const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
+const DEFAULT_IMAGE_FOLLOW_MODE: ImageFollowMode = "auto";
 
 interface UploadPayload {
   audioBuffer: Buffer;
@@ -49,6 +51,7 @@ interface SessionRecordRow {
   analysis_reasoning_effort: AnalysisReasoningEffort | null;
   image_size_preset: ImageSizePreset | null;
   image_generation_profile: ImageGenerationProfile | "quality" | null;
+  image_follow_mode: ImageFollowMode | null;
   error_message: string | null;
 }
 
@@ -96,6 +99,10 @@ function normalizeSummary(row: SessionRecordRow): SessionSummary {
         : row.image_generation_profile === "pro" || row.image_generation_profile === "quality"
           ? "pro"
           : DEFAULT_IMAGE_GENERATION_PROFILE,
+    imageFollowMode:
+      row.image_follow_mode === "loose" || row.image_follow_mode === "close" || row.image_follow_mode === "auto"
+        ? row.image_follow_mode
+        : DEFAULT_IMAGE_FOLLOW_MODE,
     errorMessage: row.error_message
   };
 }
@@ -292,6 +299,7 @@ export async function createSupabaseSession(
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
     imageGenerationProfile?: ImageGenerationProfile;
+    imageFollowMode?: ImageFollowMode;
   }
 ) {
   const id = randomUUID();
@@ -314,6 +322,7 @@ export async function createSupabaseSession(
       analysis_reasoning_effort: options?.analysisReasoningEffort ?? DEFAULT_ANALYSIS_REASONING_EFFORT,
       image_size_preset: options?.imageSizePreset ?? DEFAULT_IMAGE_SIZE_PRESET,
       image_generation_profile: options?.imageGenerationProfile ?? DEFAULT_IMAGE_GENERATION_PROFILE,
+      image_follow_mode: options?.imageFollowMode ?? DEFAULT_IMAGE_FOLLOW_MODE,
       error_message: null
     })
     .select("*")
@@ -372,6 +381,7 @@ export async function updateSupabaseSessionPreferences(
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
     imageGenerationProfile?: ImageGenerationProfile;
+    imageFollowMode?: ImageFollowMode;
   }
 ) {
   const current = await getSessionRow(sessionId);
@@ -382,7 +392,8 @@ export async function updateSupabaseSessionPreferences(
   return updateSessionRow(sessionId, {
     analysis_reasoning_effort: preferences.analysisReasoningEffort ?? current.analysis_reasoning_effort,
     image_size_preset: preferences.imageSizePreset ?? current.image_size_preset,
-    image_generation_profile: preferences.imageGenerationProfile ?? current.image_generation_profile
+    image_generation_profile: preferences.imageGenerationProfile ?? current.image_generation_profile,
+    image_follow_mode: preferences.imageFollowMode ?? current.image_follow_mode
   });
 }
 

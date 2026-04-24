@@ -5,6 +5,7 @@ import {
   AnalysisReasoningEffort,
   AssetKind,
   DrawingEvent,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
   SceneAnalysis,
@@ -43,6 +44,7 @@ const GALLERY_SESSION_LIMIT = 8;
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
 const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
+const DEFAULT_IMAGE_FOLLOW_MODE: ImageFollowMode = "auto";
 
 interface SessionMeta extends SessionSummary {}
 
@@ -77,7 +79,11 @@ function normalizeSummary(summary: SessionSummary | (Partial<SessionSummary> & {
         ? "fast"
         : summary.imageGenerationProfile === "pro" || summary.imageGenerationProfile === "quality"
           ? "pro"
-          : DEFAULT_IMAGE_GENERATION_PROFILE
+          : DEFAULT_IMAGE_GENERATION_PROFILE,
+    imageFollowMode:
+      summary.imageFollowMode === "loose" || summary.imageFollowMode === "close" || summary.imageFollowMode === "auto"
+        ? summary.imageFollowMode
+        : DEFAULT_IMAGE_FOLLOW_MODE
   } satisfies SessionSummary;
 }
 
@@ -310,6 +316,7 @@ export async function createSession(
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
     imageGenerationProfile?: ImageGenerationProfile;
+    imageFollowMode?: ImageFollowMode;
   },
   userId?: string
 ) {
@@ -337,6 +344,7 @@ export async function createSession(
     analysisReasoningEffort: options?.analysisReasoningEffort ?? DEFAULT_ANALYSIS_REASONING_EFFORT,
     imageSizePreset: options?.imageSizePreset ?? DEFAULT_IMAGE_SIZE_PRESET,
     imageGenerationProfile: options?.imageGenerationProfile ?? DEFAULT_IMAGE_GENERATION_PROFILE,
+    imageFollowMode: options?.imageFollowMode ?? DEFAULT_IMAGE_FOLLOW_MODE,
     errorMessage: null
   };
 
@@ -413,6 +421,7 @@ export async function updateSessionPreferences(
     analysisReasoningEffort?: AnalysisReasoningEffort;
     imageSizePreset?: ImageSizePreset;
     imageGenerationProfile?: ImageGenerationProfile;
+    imageFollowMode?: ImageFollowMode;
   }
 ) {
   if (hasSupabaseAdminConfig()) {
@@ -431,7 +440,8 @@ export async function updateSessionPreferences(
       preferences.analysisReasoningEffort ?? summary.analysisReasoningEffort,
     imageSizePreset: preferences.imageSizePreset ?? summary.imageSizePreset,
     imageGenerationProfile:
-      preferences.imageGenerationProfile ?? summary.imageGenerationProfile
+      preferences.imageGenerationProfile ?? summary.imageGenerationProfile,
+    imageFollowMode: preferences.imageFollowMode ?? summary.imageFollowMode
   });
 
   await upsertSummary(nextSummary);

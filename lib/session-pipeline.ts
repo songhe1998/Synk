@@ -15,6 +15,7 @@ import {
 import { buildDisplayTranscript } from "@/lib/transcript-format";
 import {
   AnalysisReasoningEffort,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageGenerationSource,
   ImageSizePreset,
@@ -42,16 +43,19 @@ async function getRequiredSession(sessionId: string) {
 export async function ensureSessionAnalysis({
   sessionId,
   reasoningEffort,
-  imageGenerationProfile
+  imageGenerationProfile,
+  imageFollowMode
 }: {
   sessionId: string;
   reasoningEffort?: AnalysisReasoningEffort;
   imageGenerationProfile?: ImageGenerationProfile;
+  imageFollowMode?: ImageFollowMode;
 }) {
-  if (reasoningEffort || imageGenerationProfile) {
+  if (reasoningEffort || imageGenerationProfile || imageFollowMode) {
     await updateSessionPreferences(sessionId, {
       analysisReasoningEffort: reasoningEffort,
-      imageGenerationProfile
+      imageGenerationProfile,
+      imageFollowMode
     });
   }
 
@@ -110,30 +114,36 @@ export async function ensureSessionGeneratedImage({
   source = "labeled",
   reasoningEffort,
   imageSizePreset,
-  imageGenerationProfile
+  imageGenerationProfile,
+  imageFollowMode,
+  force = false
 }: {
   sessionId: string;
   source?: ImageGenerationSource;
   reasoningEffort?: AnalysisReasoningEffort;
   imageSizePreset?: ImageSizePreset;
   imageGenerationProfile?: ImageGenerationProfile;
+  imageFollowMode?: ImageFollowMode;
+  force?: boolean;
 }) {
-  if (imageSizePreset || imageGenerationProfile) {
+  if (imageSizePreset || imageGenerationProfile || imageFollowMode) {
     await updateSessionPreferences(sessionId, {
       imageSizePreset,
-      imageGenerationProfile
+      imageGenerationProfile,
+      imageFollowMode
     });
   }
 
   let session = await ensureSessionAnalysis({
     sessionId,
     reasoningEffort,
-    imageGenerationProfile
+    imageGenerationProfile,
+    imageFollowMode
   });
 
   const existingTarget =
     source === "labeled" ? session.generatedImageLabeledUrl : session.generatedImagePlainUrl;
-  if (existingTarget) {
+  if (existingTarget && !force) {
     return session;
   }
 
@@ -151,7 +161,8 @@ export async function ensureSessionGeneratedImage({
     height: session.canvasHeight,
     source,
     imageSizePreset: session.imageSizePreset,
-    profile: session.imageGenerationProfile
+    profile: session.imageGenerationProfile,
+    imageFollowMode: session.imageFollowMode
   });
 
   await saveSessionAsset(
@@ -168,19 +179,22 @@ export async function createImageExperience({
   sessionId,
   reasoningEffort,
   imageSizePreset,
-  imageGenerationProfile
+  imageGenerationProfile,
+  imageFollowMode
 }: {
   sessionId: string;
   reasoningEffort?: AnalysisReasoningEffort;
   imageSizePreset?: ImageSizePreset;
   imageGenerationProfile?: ImageGenerationProfile;
+  imageFollowMode?: ImageFollowMode;
 }) {
   return ensureSessionGeneratedImage({
     sessionId,
     source: "labeled",
     reasoningEffort,
     imageSizePreset,
-    imageGenerationProfile
+    imageGenerationProfile,
+    imageFollowMode
   });
 }
 

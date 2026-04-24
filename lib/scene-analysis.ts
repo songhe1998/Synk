@@ -7,6 +7,7 @@ import {
   DrawingEvent,
   GlobalSceneInfo,
   GroundedSceneObject,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
   ImageGenerationSource,
@@ -264,20 +265,40 @@ function supportsInputFidelity(model: string) {
 
 function buildImageSourceInstruction(
   source: ImageGenerationSource,
-  profile: ImageGenerationProfile
+  profile: ImageGenerationProfile,
+  followMode: ImageFollowMode
 ) {
   const renderGuardrail =
     profile === "fast"
       ? "Render a finished scene, not a sketch, line drawing, diagram, blueprint, or storyboard frame. Do not preserve hand-drawn outlines."
       : "";
 
-  if (source === "labeled") {
-    return `${renderGuardrail} Use the sketch lines and nearby labels as composition and identity hints. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes. If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for a named object, render the intended object naturally rather than preserving primitive geometry. Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, or when the transcript explicitly asks for precise shapes. Do not include any labels, text, dots, guide lines, or callout lines in the final image.`
-      .trim();
-  }
+  const identityIntro =
+    source === "labeled"
+      ? "Use the sketch lines and nearby labels as identity and composition guidance."
+      : "Use the plain sketch lines and their relative positions as composition guidance. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.";
 
-  return `${renderGuardrail} Use the plain sketch lines and their relative positions as composition hints. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes. If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for an intended object, render the intended object naturally rather than preserving primitive geometry. Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, or when the spoken prompt explicitly asks for precise shapes. There are no labels available, so infer object identity from the spoken prompt and the sketch geometry alone.`
-    .trim();
+  const followInstruction =
+    followMode === "loose"
+      ? [
+          "Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing.",
+          "Do not trace literal contours or silhouette edges unless the transcript explicitly demands exact geometry.",
+          "Treat primitive circles, ovals, rectangles, arrows, and blobs as loose placeholders, and resolve the intended objects into natural final forms."
+        ].join(" ")
+      : followMode === "close"
+        ? [
+            "Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing.",
+            "Trace the literal contours, silhouette direction, and connector geometry more closely than usual.",
+            "For primitive circles, ovals, rectangles, arrows, and blobs, keep the final object's shape boundary close to the drawn boundary unless that would directly conflict with the transcript.",
+            "Keep geometric, symbolic, diagrammatic, interface-like, and map-like elements tightly aligned to the sketch."
+          ].join(" ")
+        : [
+            "Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes.",
+            "If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for an intended object, render the intended object naturally rather than preserving primitive geometry.",
+            "Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, map-like, or when the transcript explicitly asks for precise shapes."
+          ].join(" ");
+
+  return `${renderGuardrail} ${identityIntro} ${followInstruction} Do not include any labels, text, dots, guide lines, or callout lines in the final image.`.trim();
 }
 
 async function callResponsesApi(payload: object, apiKey: string) {
@@ -330,9 +351,9 @@ Rules:
 - Put background, style, relationships, and story/mood into global_info.
 - Infer the intended visual style from the transcript itself. Use explicit style requests when they exist, and otherwise infer a fitting finished-image style from the user's wording, mood, subject matter, and descriptive cues.
 - If the transcript does not provide meaningful style cues, keep the style natural and neutral rather than forcing a named style.
-- Write generation_prompt as a natural paragraph for a finished image that preserves the intended composition, object relationships, and framing from the sketch, but does not assume rough sketch geometry is final geometry.
-- By default, treat circles, ovals, rectangles, arrows, and rough blobs in the sketch as placeholder blocking for intended objects rather than final contours.
-- Only imply strict geometric fidelity when the transcript clearly calls for geometric, symbolic, diagrammatic, logo-like, interface-like, or otherwise shape-driven forms.
+- Write generation_prompt as a natural paragraph for a finished image that describes the intended visible scene, composition, relationships, atmosphere, and framing.
+- Do not mention sketch lines, labels, callouts, or placeholder geometry in generation_prompt unless they are truly meant to appear in the final image.
+- If spoken geometry is only a placeholder for a semantic object, describe the semantic object instead of the placeholder shape.
 - The prompt should describe the intended final image style, whether explicitly requested or reasonably inferred from the transcript.
 `.trim();
 
@@ -552,7 +573,7 @@ export function groundSceneExtraction({
     transcriptText: buildDisplayTranscript(transcript),
     objects,
     globalInfo: extraction.global_info,
-    generationPrompt: `${extraction.generation_prompt.trim()} Use the provided labeled sketch as a composition guide, not a tracing target. Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing. Decide whether each sketched shape is literal or only placeholder blocking. If the transcript clearly implies geometric, symbolic, diagrammatic, logo-like, interface-like, or otherwise shape-driven forms, follow that shape more strictly. Otherwise, transform rough circles, ovals, rectangles, arrows, and blobs into natural final silhouettes or structures for the intended objects. Treat each label tag as the identity of the nearby object. The label tags, callout lines, and any sketch annotations are only guidance and must not appear in the final rendered image.`,
+    generationPrompt: extraction.generation_prompt.trim(),
     notes: [
       `Scene understanding generated with ${extractionModel}.`,
       `Objects grounded against ${clusters.length} stroke clusters.`
@@ -791,7 +812,8 @@ export async function generateImageFromSketch({
   height,
   source,
   imageSizePreset,
-  profile = "pro"
+  profile = "pro",
+  imageFollowMode = "auto"
 }: {
   prompt: string;
   sketchImage: Buffer;
@@ -801,9 +823,10 @@ export async function generateImageFromSketch({
   source: ImageGenerationSource;
   imageSizePreset: ImageSizePreset;
   profile?: ImageGenerationProfile;
+  imageFollowMode?: ImageFollowMode;
 }) {
   const imageToolModel = profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL;
-  const sourceInstruction = buildImageSourceInstruction(source, profile);
+  const sourceInstruction = buildImageSourceInstruction(source, profile, imageFollowMode);
   const imageToolSize =
     profile === "fast" ? resolveFastImageSize() : resolveImageToolSize(width, height, imageSizePreset);
   const preparedSketch =

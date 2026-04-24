@@ -1,7 +1,7 @@
 import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
 import { ensureSessionAnalysis } from "@/lib/session-pipeline";
-import { AnalysisReasoningEffort, ImageGenerationProfile } from "@/lib/types";
+import { AnalysisReasoningEffort, ImageFollowMode, ImageGenerationProfile } from "@/lib/types";
 import { NextResponse } from "next/server";
 
 function parseReasoningEffort(value: unknown): AnalysisReasoningEffort | undefined {
@@ -16,6 +16,10 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
     return "pro";
   }
   return undefined;
+}
+
+function parseImageFollowMode(value: unknown): ImageFollowMode | undefined {
+  return value === "auto" || value === "loose" || value === "close" ? value : undefined;
 }
 
 export async function POST(
@@ -38,7 +42,8 @@ export async function POST(
     const updatedSession = await ensureSessionAnalysis({
       sessionId,
       reasoningEffort: parseReasoningEffort(body?.reasoningEffort),
-      imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile)
+      imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile),
+      imageFollowMode: parseImageFollowMode(body?.imageFollowMode)
     });
     return NextResponse.json(updatedSession);
   } catch (error) {

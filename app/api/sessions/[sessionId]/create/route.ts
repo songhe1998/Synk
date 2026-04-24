@@ -6,6 +6,7 @@ import { startWebsiteGenerationJob } from "@/lib/website-pipeline";
 import { startWorldGenerationJob } from "@/lib/world-pipeline";
 import {
   AnalysisReasoningEffort,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
   VideoModelPreset,
@@ -29,6 +30,10 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
     return "pro";
   }
   return undefined;
+}
+
+function parseImageFollowMode(value: unknown): ImageFollowMode | undefined {
+  return value === "auto" || value === "loose" || value === "close" ? value : undefined;
 }
 
 function parseTarget(value: unknown) {
@@ -78,6 +83,7 @@ export async function POST(
   const reasoningEffort = parseReasoningEffort(body?.reasoningEffort);
   const imageSizePreset = parseImageSizePreset(body?.imageSizePreset);
   const imageGenerationProfile = parseImageGenerationProfile(body?.imageGenerationProfile);
+  const imageFollowMode = parseImageFollowMode(body?.imageFollowMode);
   const videoModelPreset = parseVideoModelPreset(body?.videoModelPreset);
   const videoPipelineMode = parseVideoPipelineMode(body?.videoPipelineMode);
 
@@ -87,7 +93,8 @@ export async function POST(
         sessionId,
         reasoningEffort,
         imageSizePreset,
-        imageGenerationProfile
+        imageGenerationProfile,
+        imageFollowMode
       });
 
       return NextResponse.json(
@@ -105,7 +112,8 @@ export async function POST(
             sessionId,
             reasoningEffort,
             imageSizePreset,
-            imageGenerationProfile
+            imageGenerationProfile,
+            imageFollowMode
           })
         : null;
 

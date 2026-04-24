@@ -1,7 +1,12 @@
 import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
 import { ensureSessionGeneratedImage } from "@/lib/session-pipeline";
-import { ImageGenerationProfile, ImageGenerationSource, ImageSizePreset } from "@/lib/types";
+import {
+  ImageFollowMode,
+  ImageGenerationProfile,
+  ImageGenerationSource,
+  ImageSizePreset
+} from "@/lib/types";
 import { NextResponse } from "next/server";
 
 function parseImageSizePreset(value: unknown): ImageSizePreset | undefined {
@@ -16,6 +21,10 @@ function parseImageGenerationProfile(value: unknown): ImageGenerationProfile | u
     return "pro";
   }
   return undefined;
+}
+
+function parseImageFollowMode(value: unknown): ImageFollowMode | undefined {
+  return value === "auto" || value === "loose" || value === "close" ? value : undefined;
 }
 
 export async function POST(
@@ -43,7 +52,9 @@ export async function POST(
       sessionId,
       source,
       imageSizePreset: parseImageSizePreset(body?.imageSizePreset),
-      imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile)
+      imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile),
+      imageFollowMode: parseImageFollowMode(body?.imageFollowMode),
+      force: true
     });
     return NextResponse.json(updatedSession);
   } catch (error) {

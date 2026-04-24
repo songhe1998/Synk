@@ -20,6 +20,7 @@ import {
   DrawingEvent,
   DrawingState,
   DrawingTool,
+  ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
   SessionDetail,
@@ -39,6 +40,7 @@ const SKETCH_FLIGHT_REPLACE_DELAY_MS = 560;
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
 const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
+const IMAGE_FOLLOW_MODES: ImageFollowMode[] = ["auto", "loose", "close"];
 const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 const GALLERY_CACHE_VERSION = "v1";
@@ -87,6 +89,7 @@ interface FinalizeOptionsSnapshot {
   reasoningEffort: AnalysisReasoningEffort;
   imageSizePreset: ImageSizePreset;
   imageGenerationProfile: ImageGenerationProfile;
+  imageFollowMode: ImageFollowMode;
   videoModelPreset: VideoModelPreset;
   videoPipelineMode: VideoPipelineMode;
 }
@@ -206,7 +209,8 @@ export function RecorderShell({
   const createSessionConfigRef = useRef({
     analysisReasoningEffort: "medium" as AnalysisReasoningEffort,
     imageSizePreset: "medium" as ImageSizePreset,
-    imageGenerationProfile: "fast" as ImageGenerationProfile
+    imageGenerationProfile: "fast" as ImageGenerationProfile,
+    imageFollowMode: "auto" as ImageFollowMode
   });
   const canListenRef = useRef(!(authEnabled && !viewer));
   const galleryNoticeTimeoutRef = useRef<number | null>(null);
@@ -215,6 +219,7 @@ export function RecorderShell({
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
   const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("fast");
+  const [imageFollowMode, setImageFollowMode] = useState<ImageFollowMode>("auto");
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [outputTarget, setOutputTarget] = useState<OutputTarget>("image");
@@ -243,9 +248,10 @@ export function RecorderShell({
     createSessionConfigRef.current = {
       analysisReasoningEffort,
       imageSizePreset,
-      imageGenerationProfile
+      imageGenerationProfile,
+      imageFollowMode
     };
-  }, [analysisReasoningEffort, imageGenerationProfile, imageSizePreset]);
+  }, [analysisReasoningEffort, imageFollowMode, imageGenerationProfile, imageSizePreset]);
 
   useEffect(() => {
     setActiveViewer(viewer);
@@ -459,6 +465,7 @@ export function RecorderShell({
       reasoningEffort: analysisReasoningEffort,
       imageSizePreset,
       imageGenerationProfile,
+      imageFollowMode,
       videoModelPreset,
       videoPipelineMode
     };
@@ -697,7 +704,8 @@ export function RecorderShell({
         title,
         analysisReasoningEffort: config.analysisReasoningEffort,
         imageSizePreset: config.imageSizePreset,
-        imageGenerationProfile: config.imageGenerationProfile
+        imageGenerationProfile: config.imageGenerationProfile,
+        imageFollowMode: config.imageFollowMode
       })
     });
 
@@ -979,6 +987,7 @@ export function RecorderShell({
           reasoningEffort: options.reasoningEffort,
           imageSizePreset: options.imageSizePreset,
           imageGenerationProfile: options.imageGenerationProfile,
+          imageFollowMode: options.imageFollowMode,
           videoModelPreset: options.videoModelPreset,
           videoPipelineMode: options.videoPipelineMode
         })
@@ -1743,6 +1752,30 @@ export function RecorderShell({
                     {imageGenerationProfile === "fast"
                       ? "Fast uses GPT-5.4 mini plus GPT Image 1 mini, low image quality, low-fidelity editing, and a fixed 1024 square pass to cut latency and cost."
                       : "Pro uses GPT-5.4 plus GPT Image 1.5, medium image quality, the same inferred-style scene analysis, and a higher-fidelity image pass for stronger final quality."}
+                  </p>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Sketch follow</span>
+                  <div className="segmented-control">
+                    {IMAGE_FOLLOW_MODES.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        className={imageFollowMode === mode ? "active" : ""}
+                        onClick={() => setImageFollowMode(mode)}
+                        disabled={controlTransitioning}
+                      >
+                        {mode === "auto" ? "Auto" : mode === "loose" ? "Loose" : "Close"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="recorder-settings-copy">
+                    {imageFollowMode === "auto"
+                      ? "Auto keeps composition strict, then decides whether contours are placeholders or literal final shapes."
+                      : imageFollowMode === "loose"
+                        ? "Loose preserves footprint, framing, and placement, but relaxes primitive circles, ovals, and boxes into natural final forms."
+                        : "Close keeps both composition and contour much tighter to the sketch. Use it for flowcharts, UI, maps, and geometric layouts."}
                   </p>
                 </section>
 

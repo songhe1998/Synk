@@ -23,7 +23,8 @@ create table if not exists public.sessions (
   transcript_approximate boolean not null default false,
   analysis_reasoning_effort text not null default 'medium' check (analysis_reasoning_effort in ('low', 'medium', 'high')),
   image_size_preset text not null default 'medium' check (image_size_preset in ('small', 'medium', 'large')),
-  image_generation_profile text not null default 'pro' check (image_generation_profile in ('pro', 'fast')),
+  image_generation_profile text not null default 'fast' check (image_generation_profile in ('pro', 'fast')),
+  image_follow_mode text not null default 'auto' check (image_follow_mode in ('auto', 'loose', 'close')),
   error_message text
 );
 

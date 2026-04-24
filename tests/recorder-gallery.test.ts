@@ -24,6 +24,7 @@ function makeSession(overrides: Partial<SessionDetail> = {}): SessionDetail {
     analysisReasoningEffort: "medium",
     imageSizePreset: "medium",
     imageGenerationProfile: "pro",
+    imageFollowMode: "auto",
     errorMessage: null,
     events: [],
     transcript: [],
@@ -38,6 +39,7 @@ function makeSession(overrides: Partial<SessionDetail> = {}): SessionDetail {
     analysis: null,
     worldJobs: [],
     videoJobs: [],
+    websiteJobs: [],
     ...overrides
   };
 }
@@ -235,6 +237,7 @@ test("placeholder gallery items do not fall back to the session detail page when
     analysisReasoningEffort: "medium",
     imageSizePreset: "medium",
     imageGenerationProfile: "pro",
+    imageFollowMode: "auto",
     errorMessage: null,
     preferredResultUrl: null
   });

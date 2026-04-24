@@ -5,6 +5,7 @@ export type TokenGranularity = "word" | "char" | "punctuation";
 export type AnalysisReasoningEffort = "low" | "medium" | "high";
 export type ImageSizePreset = "small" | "medium" | "large";
 export type ImageGenerationProfile = "pro" | "fast";
+export type ImageFollowMode = "auto" | "loose" | "close";
 export type AssetKind =
   | "sketch"
   | "annotatedSketch"
@@ -199,6 +200,7 @@ export interface SessionSummary {
   analysisReasoningEffort: AnalysisReasoningEffort;
   imageSizePreset: ImageSizePreset;
   imageGenerationProfile: ImageGenerationProfile;
+  imageFollowMode: ImageFollowMode;
   errorMessage: string | null;
   preferredResultUrl?: string | null;
 }

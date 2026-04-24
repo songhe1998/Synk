@@ -8,6 +8,7 @@ import {
   AnalysisReasoningEffort,
   DrawingState,
   GroundedSceneObject,
+  ImageFollowMode,
   ImageGenerationSource,
   ImageSizePreset,
   SessionDetail,
@@ -28,6 +29,7 @@ type AssetView =
   | "generatedVideoSource";
 const REASONING_EFFORTS: AnalysisReasoningEffort[] = ["low", "medium", "high"];
 const IMAGE_SIZE_PRESETS: ImageSizePreset[] = ["small", "medium", "large"];
+const IMAGE_FOLLOW_MODES: ImageFollowMode[] = ["auto", "loose", "close"];
 const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 
@@ -151,6 +153,7 @@ export function PlaybackShell({
   const [selectedAssetView, setSelectedAssetView] = useState<AssetView>(() => getDefaultAssetView(session));
   const [reasoningEffort, setReasoningEffort] = useState<AnalysisReasoningEffort>(session.analysisReasoningEffort);
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>(session.imageSizePreset);
+  const [imageFollowMode, setImageFollowMode] = useState<ImageFollowMode>(session.imageFollowMode);
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
   const [analysisExpanded, setAnalysisExpanded] = useState(false);
@@ -308,6 +311,7 @@ export function PlaybackShell({
     setSessionData(payload);
     setReasoningEffort(payload.analysisReasoningEffort);
     setImageSizePreset(payload.imageSizePreset);
+    setImageFollowMode(payload.imageFollowMode);
     setSelectedAssetView((current) => resolveAssetView(payload, current));
     return payload;
   }
@@ -325,7 +329,8 @@ export function PlaybackShell({
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          reasoningEffort
+          reasoningEffort,
+          imageFollowMode
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -336,6 +341,7 @@ export function PlaybackShell({
       setSessionData(nextSession);
       setReasoningEffort(nextSession.analysisReasoningEffort);
       setImageSizePreset(nextSession.imageSizePreset);
+      setImageFollowMode(nextSession.imageFollowMode);
       setSelectedAssetView(resolveAssetView(nextSession, "annotatedSketch"));
     } catch (error) {
       if (!options?.background) {
@@ -360,7 +366,8 @@ export function PlaybackShell({
         },
         body: JSON.stringify({
           source,
-          imageSizePreset
+          imageSizePreset,
+          imageFollowMode
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -371,6 +378,7 @@ export function PlaybackShell({
       setSessionData(nextSession);
       setReasoningEffort(nextSession.analysisReasoningEffort);
       setImageSizePreset(nextSession.imageSizePreset);
+      setImageFollowMode(nextSession.imageFollowMode);
       setSelectedAssetView(resolveAssetView(nextSession, source === "labeled" ? "generatedLabeled" : "generatedPlain"));
     } catch (error) {
       if (!options?.background) {
@@ -716,17 +724,34 @@ export function PlaybackShell({
                 ))}
               </div>
             </div>
+
+            <div className="analysis-option-group">
+              <span className="analysis-option-label">Sketch follow</span>
+              <div className="segmented-control">
+                {IMAGE_FOLLOW_MODES.map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={imageFollowMode === mode ? "active" : ""}
+                    onClick={() => setImageFollowMode(mode)}
+                    disabled={analysisBusy || generationSourceBusy !== null}
+                  >
+                    {mode === "auto" ? "Auto" : mode === "loose" ? "Loose" : "Close"}
+                  </button>
+                ))}
+              </div>
+            </div>
           </div>
 
           {!analysisExpanded ? (
             <div className="analysis-collapsed-card">
               <p className="analysis-copy">
                 {analysisBusy
-                  ? `Analysis is running in the background with ${reasoningEffort} reasoning.`
+                  ? `Analysis is running in the background with ${reasoningEffort} reasoning and ${imageFollowMode} sketch follow saved for the next image pass.`
                   : generationSourceBusy === "labeled"
-                    ? `The labeled result is generating at ${imageSizePreset} size.`
+                    ? `The labeled result is generating at ${imageSizePreset} size with ${imageFollowMode} sketch follow.`
                     : generationSourceBusy === "plain"
-                      ? `The plain image result is generating at ${imageSizePreset} size.`
+                      ? `The plain image result is generating at ${imageSizePreset} size with ${imageFollowMode} sketch follow.`
                       : sessionData.analysis
                         ? sessionData.generatedImageLabeledUrl
                           ? "Analysis is ready and the labeled image has already been generated. Expand this panel to inspect objects, evidence, and the generation prompt."
