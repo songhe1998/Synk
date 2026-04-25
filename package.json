@@ -9,7 +9,9 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "tsx --test tests/**/*.test.ts"
+    "test": "tsx --test tests/**/*.test.ts",
+    "benchmark:website-edits": "tsx scripts/run-website-edit-benchmark.ts",
+    "benchmark:website-edits:live": "tsx scripts/run-website-edit-live-smoke.ts"
   },
   "dependencies": {
     "@sparkjsdev/spark": "^0.1.10",

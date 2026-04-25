@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import path from "path";
-import { WebsiteArtifactKind, WebsiteJob } from "@/lib/types";
+import { WebsiteArtifactKind, WebsiteEditTargetResolution, WebsiteJob } from "@/lib/types";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSupabaseStorageBucket } from "@/lib/supabase/config";
 import { readSessionBinaryAsset } from "@/lib/supabase-asset-store";
@@ -17,6 +17,9 @@ interface SessionOwnerRow {
 interface WebsiteJobRow {
   id: string;
   session_id: string;
+  parent_job_id: string | null;
+  revision_number: number | null;
+  job_kind: WebsiteJob["jobKind"] | null;
   status: WebsiteJob["status"];
   created_at: string;
   updated_at: string;
@@ -28,6 +31,8 @@ interface WebsiteJobRow {
   transcript_text: string;
   pages: WebsiteJob["pages"];
   prompt: string;
+  edit_instruction_text: string | null;
+  edit_target: WebsiteEditTargetResolution | null;
   status_detail: string | null;
   error_message: string | null;
   preview_image_file_name: string | null;
@@ -59,6 +64,9 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
   return {
     id: row.id,
     sessionId: row.session_id,
+    parentJobId: row.parent_job_id ?? null,
+    revisionNumber: row.revision_number ?? 1,
+    jobKind: row.job_kind === "edit" ? "edit" : "initial",
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -70,6 +78,8 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
     transcriptText: row.transcript_text,
     pages,
     prompt: row.prompt,
+    editInstructionText: row.edit_instruction_text ?? null,
+    editTarget: row.edit_target ?? null,
     statusDetail: row.status_detail,
     errorMessage: row.error_message,
     previewImageFileName: row.preview_image_file_name,
@@ -93,8 +103,8 @@ function toWebsiteJobRow(
     codeArchiveStoragePath: string | null;
     distArchiveStoragePath: string | null;
   }
-): WebsiteJobRow {
-  return {
+): Record<string, unknown> {
+  const row: Record<string, unknown> = {
     id: job.id,
     session_id: sessionId,
     status: job.status,
@@ -120,6 +130,16 @@ function toWebsiteJobRow(
     dist_archive_mime_type: job.distArchiveMimeType,
     dist_archive_storage_path: existingPaths.distArchiveStoragePath
   };
+
+  if (job.jobKind === "edit" || job.parentJobId || job.revisionNumber !== 1 || job.editInstructionText || job.editTarget) {
+    row.parent_job_id = job.parentJobId;
+    row.revision_number = job.revisionNumber;
+    row.job_kind = job.jobKind;
+    row.edit_instruction_text = job.editInstructionText;
+    row.edit_target = job.editTarget;
+  }
+
+  return row;
 }
 
 async function getSessionOwner(sessionId: string) {

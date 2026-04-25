@@ -2,7 +2,7 @@ import path from "path";
 import { createHash } from "crypto";
 import { mkdir, readdir, readFile, rm, writeFile } from "fs/promises";
 import { Sandbox, Snapshot } from "@vercel/sandbox";
-import { WebsiteJob, WebsiteJobStatus } from "@/lib/types";
+import { WebsiteEditTargetResolution, WebsiteJob, WebsiteJobStatus } from "@/lib/types";
 import { getWebsitePreviewMimeType } from "@/lib/website-artifacts";
 import { getSessionAsset } from "@/lib/session-store";
 import { readCodexAuthJson } from "@/lib/codex-auth";
@@ -31,17 +31,26 @@ const PLANNER_SCHEMA_PATH = `${PLANNER_DIR}/schema.json`;
 const PLANNER_OUTPUT_PATH = `${PLANNER_DIR}/plan.json`;
 const PLANNER_LOG_PATH = `${PLANNER_DIR}/planner.log`;
 const REPAIR_PROMPT_PATH = `${INPUT_DIR}/repair.txt`;
+const EDIT_PROMPT_PATH = `${INPUT_DIR}/edit-prompt.txt`;
 const CODEX_GENERATION_LOG_PATH = `${ARTIFACTS_DIR}/codex-generation.log`;
 const CODEX_REPAIR_LOG_PATH = `${ARTIFACTS_DIR}/codex-repair.log`;
+const CODEX_EDIT_LOG_PATH = `${ARTIFACTS_DIR}/codex-edit.log`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
 const SANDBOX_COMMAND_WAIT_SLICE_MS = 10 * 1000;
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
-const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || null;
+const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || "gpt-5.4";
+const WEBSITE_CODEX_CODEGEN_MODEL = process.env.WEBSITE_CODEX_CODEGEN_MODEL?.trim() || WEBSITE_CODEX_MODEL;
+const WEBSITE_CODEX_PLANNER_MODEL = process.env.WEBSITE_CODEX_PLANNER_MODEL?.trim() || WEBSITE_CODEX_MODEL;
 const WEBSITE_CODEX_REASONING_EFFORT = process.env.WEBSITE_CODEX_REASONING_EFFORT?.trim() || "medium";
 const WEBSITE_CODEX_CODEGEN_REASONING_EFFORT =
   process.env.WEBSITE_CODEX_CODEGEN_REASONING_EFFORT?.trim() || WEBSITE_CODEX_REASONING_EFFORT;
 const WEBSITE_CODEX_PLANNER_REASONING_EFFORT =
   process.env.WEBSITE_CODEX_PLANNER_REASONING_EFFORT?.trim() || WEBSITE_CODEX_REASONING_EFFORT;
+const WEBSITE_CODEX_SERVICE_TIER = process.env.WEBSITE_CODEX_SERVICE_TIER?.trim() || "fast";
+const WEBSITE_CODEX_CODEGEN_SERVICE_TIER =
+  process.env.WEBSITE_CODEX_CODEGEN_SERVICE_TIER?.trim() || WEBSITE_CODEX_SERVICE_TIER;
+const WEBSITE_CODEX_PLANNER_SERVICE_TIER =
+  process.env.WEBSITE_CODEX_PLANNER_SERVICE_TIER?.trim() || WEBSITE_CODEX_SERVICE_TIER;
 const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
 const SNAPSHOT_CACHE_PATH = path.join(process.cwd(), ".cache", "website-sandbox-snapshot.json");
 
@@ -70,6 +79,22 @@ export interface WebsiteSandboxRunInput {
     buffer: Buffer;
   }>;
   finalProjectAssetsPromise?: Promise<WebsiteGeneratedAsset[]>;
+  onProgress?: (update: {
+    status: WebsiteJobStatus;
+    statusDetail: string;
+    sandboxId?: string;
+  }) => Promise<void> | void;
+}
+
+export interface WebsiteRevisionSandboxRunInput {
+  job: WebsiteJob;
+  parentCodeArchive: Buffer;
+  editRequest: {
+    instructionText: string;
+    targetResolution: WebsiteEditTargetResolution | null;
+    parentJobId: string;
+    parentDisplayName: string;
+  };
   onProgress?: (update: {
     status: WebsiteJobStatus;
     statusDetail: string;
@@ -175,7 +200,9 @@ function getVercelSandboxCredentials() {
   };
 }
 
-async function ensureWebsiteSandboxSnapshot(credentials: ReturnType<typeof getVercelSandboxCredentials>) {
+async function ensureWebsiteSandboxSnapshot(
+  credentials: ReturnType<typeof getVercelSandboxCredentials>
+): Promise<string | null> {
   if (process.env.WEBSITE_DISABLE_SANDBOX_SNAPSHOT === "1") {
     return null;
   }
@@ -203,14 +230,7 @@ async function ensureWebsiteSandboxSnapshot(credentials: ReturnType<typeof getVe
   }
 
   const templateFiles = await getTemplateFiles();
-  const sandbox = await Sandbox.create({
-    ...credentials,
-    runtime: "node22",
-    timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
-    resources: {
-      vcpus: 2
-    }
-  });
+  const sandbox = await createWebsiteSandbox(credentials, null);
 
   try {
     await sandbox.writeFiles(
@@ -458,14 +478,18 @@ function buildCodexShellCommand(
   promptPath: string,
   imagePaths: string[] = [],
   logPath?: string,
-  reasoningEffort = WEBSITE_CODEX_CODEGEN_REASONING_EFFORT
+  reasoningEffort = WEBSITE_CODEX_CODEGEN_REASONING_EFFORT,
+  serviceTier = WEBSITE_CODEX_CODEGEN_SERVICE_TIER,
+  model = WEBSITE_CODEX_CODEGEN_MODEL
 ) {
   const imageArgs = imagePaths
     .map((imagePath) => `-i ${shellEscape(imagePath)}`)
     .join(" ");
   const commonArgs = [
-    WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
+    model ? `-m ${shellEscape(model)}` : null,
     `-c ${shellEscape(`model_reasoning_effort="${reasoningEffort}"`)}`,
+    serviceTier ? `-c ${shellEscape(`service_tier="${serviceTier}"`)}` : null,
+    serviceTier === "fast" ? `-c ${shellEscape("features.fast_mode=true")}` : null,
     "--color never",
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
@@ -491,8 +515,12 @@ function buildCodexShellCommand(
 
 function buildCodexPlannerShellCommand(previewImagePath: string, logPath?: string) {
   const commonArgs = [
-    WEBSITE_CODEX_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_MODEL)}` : null,
+    WEBSITE_CODEX_PLANNER_MODEL ? `-m ${shellEscape(WEBSITE_CODEX_PLANNER_MODEL)}` : null,
     `-c ${shellEscape(`model_reasoning_effort="${WEBSITE_CODEX_PLANNER_REASONING_EFFORT}"`)}`,
+    WEBSITE_CODEX_PLANNER_SERVICE_TIER
+      ? `-c ${shellEscape(`service_tier="${WEBSITE_CODEX_PLANNER_SERVICE_TIER}"`)}`
+      : null,
+    WEBSITE_CODEX_PLANNER_SERVICE_TIER === "fast" ? `-c ${shellEscape("features.fast_mode=true")}` : null,
     "--skip-git-repo-check",
     "--ephemeral",
     "-s",
@@ -621,6 +649,62 @@ function appendFailureContext(error: unknown, label: string, details: string | n
   return new Error(`${message}\n\n${label}:\n${details}`);
 }
 
+function describeVercelSandboxError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  const maybeError = error as {
+    message?: string;
+    json?: { error?: { code?: string; message?: string } };
+    text?: string;
+  };
+
+  const baseMessage = maybeError.message || String(error);
+  const providerCode = maybeError.json?.error?.code?.trim();
+  const providerMessage = maybeError.json?.error?.message?.trim();
+  const rawText = maybeError.text?.trim();
+
+  if (providerCode || providerMessage) {
+    return [baseMessage, providerCode ? `Provider code: ${providerCode}` : null, providerMessage]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  if (rawText && rawText !== baseMessage) {
+    return `${baseMessage}\n${rawText}`;
+  }
+
+  return baseMessage;
+}
+
+async function createWebsiteSandbox(
+  credentials: ReturnType<typeof getVercelSandboxCredentials>,
+  source: Awaited<ReturnType<typeof getSandboxCreateSource>> | null
+) {
+  try {
+    return source
+      ? await Sandbox.create({
+          ...credentials,
+          source,
+          timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
+          resources: {
+            vcpus: 2
+          }
+        })
+      : await Sandbox.create({
+          ...credentials,
+          runtime: "node22",
+          timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
+          resources: {
+            vcpus: 2
+          }
+        });
+  } catch (error) {
+    throw new Error(describeVercelSandboxError(error));
+  }
+}
+
 async function installAndBuildWebsiteProject(sandbox: Sandbox) {
   let initialBuildError: Error | null = null;
 
@@ -671,23 +755,7 @@ export async function runWebsiteSandboxJob({
 }: WebsiteSandboxRunInput): Promise<WebsiteSandboxRunResult> {
   const credentials = getVercelSandboxCredentials();
   const source = await getSandboxCreateSource(credentials);
-  const sandbox = source
-    ? await Sandbox.create({
-        ...credentials,
-        source,
-        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
-        resources: {
-          vcpus: 2
-        }
-      })
-    : await Sandbox.create({
-        ...credentials,
-        runtime: "node22",
-        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
-        resources: {
-          vcpus: 2
-        }
-      });
+  const sandbox = await createWebsiteSandbox(credentials, source);
 
   try {
     await onProgress?.({
@@ -890,29 +958,172 @@ export async function runWebsiteSandboxJob({
   }
 }
 
+export async function runWebsiteRevisionSandboxJob({
+  job,
+  parentCodeArchive,
+  editRequest,
+  onProgress
+}: WebsiteRevisionSandboxRunInput): Promise<WebsiteSandboxRunResult> {
+  const credentials = getVercelSandboxCredentials();
+  const source = await getSandboxCreateSource(credentials);
+  const sandbox = await createWebsiteSandbox(credentials, source);
+
+  try {
+    await onProgress?.({
+      status: "running",
+      statusDetail: "Sandbox ready. Restoring the previous website source.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    const authJson = await readCodexAuthJson();
+    await sandbox.fs.mkdir(INPUT_DIR, { recursive: true });
+    await sandbox.fs.mkdir(ARTIFACTS_DIR, { recursive: true });
+    await sandbox.writeFiles([
+      {
+        path: `${INPUT_DIR}/parent-code.tar.gz`,
+        content: parentCodeArchive
+      },
+      {
+        path: EDIT_PROMPT_PATH,
+        content: Buffer.from(job.prompt, "utf8")
+      },
+      {
+        path: `${INPUT_DIR}/edit-request.json`,
+        content: Buffer.from(
+          JSON.stringify(
+            {
+              jobId: job.id,
+              parentJobId: editRequest.parentJobId,
+              parentDisplayName: editRequest.parentDisplayName,
+              instructionText: editRequest.instructionText,
+              revisionNumber: job.revisionNumber
+            },
+            null,
+            2
+          ),
+          "utf8"
+        )
+      },
+      {
+        path: `${INPUT_DIR}/target-resolution.json`,
+        content: Buffer.from(JSON.stringify(editRequest.targetResolution, null, 2), "utf8")
+      },
+      {
+        path: CODEX_AUTH_PATH,
+        content: Buffer.from(authJson, "utf8")
+      }
+    ]);
+
+    await runSandboxCommand(sandbox, {
+      cmd: "bash",
+      args: [
+        "-lc",
+        [
+          `mkdir -p ${shellEscape(PROJECT_DIR)}`,
+          `find ${shellEscape(PROJECT_DIR)} -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +`,
+          `tar -xzf ${shellEscape(`${INPUT_DIR}/parent-code.tar.gz`)} -C ${shellEscape(PROJECT_DIR)}`
+        ].join(" && ")
+      ],
+      label: "Restoring website source archive"
+    });
+
+    await onProgress?.({
+      status: "running",
+      statusDetail: "Running Codex on the targeted website edit.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    await runSandboxCommand(sandbox, {
+      cmd: "bash",
+      args: ["-lc", buildCodexShellCommand(EDIT_PROMPT_PATH, [], CODEX_EDIT_LOG_PATH)],
+      env: buildRunEnvironment(),
+      label: "Codex website edit"
+    }).catch(async (error) => {
+      const details = await readSandboxTextTail(sandbox, CODEX_EDIT_LOG_PATH);
+      throw appendFailureContext(error, "Codex edit log tail", details);
+    });
+
+    await sandbox.fs.rm(CODEX_HOME_ROOT, {
+      recursive: true,
+      force: true
+    });
+
+    await onProgress?.({
+      status: "building",
+      statusDetail: "Building the edited website.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    await installAndBuildWebsiteProject(sandbox);
+    await ensureStyledBuild(sandbox);
+
+    await onProgress?.({
+      status: "exporting",
+      statusDetail: "Exporting edited website artifacts and preview files.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    const codeArchiveFileName = `website-code-${job.id}.tar.gz`;
+    const distArchiveFileName = `website-dist-${job.id}.tar.gz`;
+
+    await runSandboxCommand(sandbox, {
+      cmd: "tar",
+      args: [
+        "--exclude=./node_modules",
+        "--exclude=./dist",
+        "--exclude=./.codex",
+        "--exclude=./.codex-inputs",
+        "-czf",
+        `${ARTIFACTS_DIR}/${codeArchiveFileName}`,
+        "."
+      ],
+      cwd: PROJECT_DIR,
+      label: "Archiving edited website source"
+    });
+
+    await runSandboxCommand(sandbox, {
+      cmd: "tar",
+      args: ["-czf", `${ARTIFACTS_DIR}/${distArchiveFileName}`, "dist"],
+      cwd: PROJECT_DIR,
+      label: "Archiving edited website dist"
+    });
+
+    const [codeArchiveBuffer, distArchiveBuffer, previewFiles] = await Promise.all([
+      sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${codeArchiveFileName}` }),
+      sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${distArchiveFileName}` }),
+      readPreviewFiles(sandbox)
+    ]);
+
+    if (!codeArchiveBuffer || !distArchiveBuffer) {
+      throw new Error("Sandbox finished without returning the edited website archives.");
+    }
+
+    return {
+      sandboxId: sandbox.sandboxId,
+      codeArchive: {
+        buffer: codeArchiveBuffer,
+        fileName: codeArchiveFileName,
+        mimeType: "application/gzip"
+      },
+      distArchive: {
+        buffer: distArchiveBuffer,
+        fileName: distArchiveFileName,
+        mimeType: "application/gzip"
+      },
+      previewFiles
+    };
+  } finally {
+    await sandbox.stop({ blocking: true }).catch(() => undefined);
+  }
+}
+
 export async function runWebsiteAssetPlanner(params: {
   previewImageBuffer: Buffer;
   transcriptText: string;
 }) {
   const credentials = getVercelSandboxCredentials();
   const source = await getSandboxCreateSource(credentials);
-  const sandbox = source
-    ? await Sandbox.create({
-        ...credentials,
-        source,
-        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
-        resources: {
-          vcpus: 2
-        }
-      })
-    : await Sandbox.create({
-        ...credentials,
-        runtime: "node22",
-        timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
-        resources: {
-          vcpus: 2
-        }
-      });
+  const sandbox = await createWebsiteSandbox(credentials, source);
 
   try {
     const authJson = await readCodexAuthJson();

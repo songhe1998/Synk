@@ -4,16 +4,27 @@ import { buildWebsiteDesignSpec } from "@/lib/website-design-spec";
 import {
   createWebsiteJob,
   getWebsiteJob,
+  getWebsiteJobArtifact,
   listWebsiteJobs,
   saveWebsiteJobArtifact,
   saveWebsitePreviewFiles,
   updateWebsiteJob
 } from "@/lib/website-store";
 import { getSessionAsset, getSessionDetail } from "@/lib/session-store";
-import { WebsiteJob } from "@/lib/types";
+import {
+  WebsiteEditAnnotation,
+  WebsiteEditDomCandidate,
+  WebsiteEditTargetResolution,
+  WebsiteJob
+} from "@/lib/types";
 import { requireWebsiteSandboxConfig } from "@/lib/website-config";
-import { runWebsiteAssetPlanner, runWebsiteSandboxJob } from "@/lib/website-sandbox";
+import {
+  runWebsiteAssetPlanner,
+  runWebsiteRevisionSandboxJob,
+  runWebsiteSandboxJob
+} from "@/lib/website-sandbox";
 import { readCodexAuthJson } from "@/lib/codex-auth";
+import { buildWebsiteEditPrompt, resolveWebsiteEditTarget } from "@/lib/website-edit-targeting";
 import {
   buildPreviewDrivenClonePrompt,
   createWebsitePlaceholderAssets,
@@ -1658,6 +1669,114 @@ async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
   }));
 }
 
+function buildWebsiteEditDisplayName(parentJob: WebsiteJob, revisionNumber: number) {
+  return `${parentJob.displayName} v${revisionNumber}`.slice(0, 80);
+}
+
+function getNextWebsiteRevisionNumber(jobs: WebsiteJob[], parentJob: WebsiteJob) {
+  return Math.max(parentJob.revisionNumber ?? 1, ...jobs.map((job) => job.revisionNumber ?? 1)) + 1;
+}
+
+async function runWebsiteEditJob(sessionId: string, jobId: string) {
+  const editJob = await getWebsiteJob(sessionId, jobId);
+  if (!editJob) {
+    throw new Error("Website edit job not found");
+  }
+
+  if (!editJob.parentJobId) {
+    throw new Error("Website edit job is missing its parent job.");
+  }
+
+  const parentJob = await getWebsiteJob(sessionId, editJob.parentJobId);
+  if (!parentJob) {
+    throw new Error("Parent website job not found.");
+  }
+
+  if (parentJob.status !== "succeeded" || !parentJob.distArchiveFileName || !parentJob.codeArchiveFileName) {
+    throw new Error("Parent website must be ready before it can be edited.");
+  }
+
+  const parentCodeArchive = await getWebsiteJobArtifact(sessionId, parentJob.id, "codeArchive");
+  if (!parentCodeArchive) {
+    throw new Error("Parent website source archive is required for editing.");
+  }
+
+  try {
+    const runningJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+      ...current,
+      status: "running",
+      statusDetail: "Preparing the existing website source for a targeted edit.",
+      errorMessage: null
+    }));
+
+    const result = await runWebsiteRevisionSandboxJob({
+      job: runningJob,
+      parentCodeArchive: parentCodeArchive.buffer,
+      editRequest: {
+        instructionText: runningJob.editInstructionText ?? "",
+        targetResolution: runningJob.editTarget,
+        parentJobId: parentJob.id,
+        parentDisplayName: parentJob.displayName
+      },
+      onProgress: async ({ status, statusDetail, sandboxId }) => {
+        await updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          status,
+          sandboxId: sandboxId ?? current.sandboxId,
+          statusDetail,
+          errorMessage: null
+        }));
+      }
+    });
+
+    await saveWebsiteJobArtifact(sessionId, jobId, {
+      kind: "codeArchive",
+      ...result.codeArchive
+    });
+    await saveWebsiteJobArtifact(sessionId, jobId, {
+      kind: "distArchive",
+      ...result.distArchive
+    });
+    await saveWebsitePreviewFiles(
+      sessionId,
+      jobId,
+      result.previewFiles.map((file) => ({
+        assetPath: file.assetPath,
+        buffer: file.buffer
+      }))
+    );
+
+    return updateWebsiteJob(sessionId, jobId, (current) => ({
+      ...current,
+      status: "succeeded",
+      sandboxId: result.sandboxId,
+      completedAt: new Date().toISOString(),
+      errorMessage: null,
+      statusDetail: "Website edit is ready."
+    }));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Website edit failed.";
+    return updateWebsiteJob(sessionId, jobId, (current) => ({
+      ...current,
+      status: "failed",
+      completedAt: new Date().toISOString(),
+      errorMessage: message,
+      statusDetail: "Website edit failed."
+    }));
+  }
+}
+
+async function runWebsiteJob(sessionId: string, jobId: string) {
+  const job = await getWebsiteJob(sessionId, jobId);
+  if (!job) {
+    throw new Error("Website job not found");
+  }
+
+  return job.jobKind === "edit"
+    ? runWebsiteEditJob(sessionId, jobId)
+    : runWebsiteGenerationJob(sessionId, jobId);
+}
+
 function queueWebsiteJobRun(sessionId: string, jobId: string) {
   const runKey = getRunKey(sessionId, jobId);
   const existingRun = websiteJobRuns.get(runKey);
@@ -1665,11 +1784,92 @@ function queueWebsiteJobRun(sessionId: string, jobId: string) {
     return existingRun;
   }
 
-  const run = runWebsiteGenerationJob(sessionId, jobId).finally(() => {
+  const run = runWebsiteJob(sessionId, jobId).finally(() => {
     websiteJobRuns.delete(runKey);
   });
   websiteJobRuns.set(runKey, run);
   return run;
+}
+
+export async function startWebsiteEditJob({
+  sessionId,
+  parentJobId,
+  instructionText,
+  annotation,
+  domCandidates
+}: {
+  sessionId: string;
+  parentJobId: string;
+  instructionText: string;
+  annotation: WebsiteEditAnnotation;
+  domCandidates: WebsiteEditDomCandidate[];
+}) {
+  requireWebsiteSandboxConfig();
+  await readCodexAuthJson();
+
+  const parentJob = await getWebsiteJob(sessionId, parentJobId);
+  if (!parentJob) {
+    throw new Error("Parent website job not found.");
+  }
+
+  if (parentJob.status !== "succeeded" || !parentJob.distArchiveUrl || !parentJob.codeArchiveUrl) {
+    throw new Error("Parent website must be ready before it can be edited.");
+  }
+
+  const trimmedInstruction = instructionText.trim();
+  if (!trimmedInstruction) {
+    throw new Error("Edit instruction is required.");
+  }
+
+  if (!annotation.strokes.length) {
+    throw new Error("A drawn annotation is required before editing the website.");
+  }
+
+  const targetResolution: WebsiteEditTargetResolution = resolveWebsiteEditTarget({
+    instructionText: trimmedInstruction,
+    annotation,
+    domCandidates
+  });
+
+  if (!targetResolution.targetElementId || targetResolution.confidence < 0.12) {
+    throw new Error("Could not identify a website element from the annotation.");
+  }
+
+  const jobs = await listWebsiteJobs(sessionId);
+  const revisionNumber = getNextWebsiteRevisionNumber(jobs, parentJob);
+  const prompt = buildWebsiteEditPrompt({
+    parentJob,
+    instructionText: trimmedInstruction,
+    targetResolution
+  });
+
+  const job = await createWebsiteJob(sessionId, {
+    parentJobId: parentJob.id,
+    revisionNumber,
+    jobKind: "edit",
+    status: "queued",
+    completedAt: null,
+    displayName: buildWebsiteEditDisplayName(parentJob, revisionNumber),
+    framework: parentJob.framework,
+    sandboxProvider: parentJob.sandboxProvider,
+    sandboxId: null,
+    transcriptText: parentJob.transcriptText,
+    pages: parentJob.pages,
+    prompt,
+    editInstructionText: trimmedInstruction,
+    editTarget: targetResolution,
+    statusDetail: "Queued for targeted website edit.",
+    errorMessage: null,
+    previewImageFileName: parentJob.previewImageFileName,
+    previewImageMimeType: parentJob.previewImageMimeType,
+    codeArchiveFileName: null,
+    codeArchiveMimeType: null,
+    distArchiveFileName: null,
+    distArchiveMimeType: null
+  });
+
+  void queueWebsiteJobRun(sessionId, job.id);
+  return job;
 }
 
 export async function startWebsiteGenerationJob({
@@ -1707,6 +1907,9 @@ export async function startWebsiteGenerationJob({
   ];
 
   const baseJob = await createWebsiteJob(sessionId, {
+    parentJobId: null,
+    revisionNumber: 1,
+    jobKind: "initial",
     status: "queued",
     completedAt: null,
     displayName: buildWebsiteDisplayName(session.title),
@@ -1716,6 +1919,8 @@ export async function startWebsiteGenerationJob({
     transcriptText,
     pages,
     prompt: "",
+    editInstructionText: null,
+    editTarget: null,
     statusDetail: "Queued for preview-first website generation.",
     errorMessage: null,
     previewImageFileName: null,

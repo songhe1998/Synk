@@ -556,6 +556,9 @@ async function main() {
   const job: WebsiteJob = {
     id: randomUUID(),
     sessionId: `preview-experiment-${randomUUID()}`,
+    parentJobId: null,
+    revisionNumber: 1,
+    jobKind: "initial",
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -567,6 +570,8 @@ async function main() {
     transcriptText: transcript,
     pages: [],
     prompt: clonePrompt,
+    editInstructionText: null,
+    editTarget: null,
     statusDetail: "Queued for preview-driven recreation.",
     errorMessage: null,
     previewImageUrl: null,

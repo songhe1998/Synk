@@ -33,6 +33,7 @@ export type WebsiteFramework = "vite-react";
 export type WebsiteSandboxProvider = "vercel";
 export type WebsiteArtifactKind = "previewImage" | "codeArchive" | "distArchive";
 export type WebsiteSourceAssetKind = "annotatedSketch";
+export type WebsiteJobKind = "initial" | "edit";
 
 export type DrawingEvent =
   | {
@@ -307,9 +308,71 @@ export interface WebsitePageInput {
   sketchUrl: string | null;
 }
 
+export interface WebsiteEditRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface WebsiteEditPoint {
+  x: number;
+  y: number;
+}
+
+export interface WebsiteEditStroke {
+  id: string;
+  points: WebsiteEditPoint[];
+}
+
+export interface WebsiteEditAnnotation {
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+  path: string;
+  scrollX: number;
+  scrollY: number;
+  bbox: WebsiteEditRect;
+  strokes: WebsiteEditStroke[];
+}
+
+export interface WebsiteEditDomCandidate {
+  id: string;
+  selector: string;
+  tagName: string;
+  role: string | null;
+  text: string | null;
+  ariaLabel: string | null;
+  className: string | null;
+  rect: WebsiteEditRect;
+}
+
+export interface WebsiteEditTargetCandidate {
+  id: string;
+  selector: string;
+  tagName: string;
+  role: string | null;
+  text: string | null;
+  rect: WebsiteEditRect;
+  score: number;
+  reason: string;
+}
+
+export interface WebsiteEditTargetResolution {
+  targetElementId: string | null;
+  targetSelector: string | null;
+  targetDescription: string;
+  confidence: number;
+  reason: string;
+  candidates: WebsiteEditTargetCandidate[];
+}
+
 export interface WebsiteJob {
   id: string;
   sessionId: string;
+  parentJobId: string | null;
+  revisionNumber: number;
+  jobKind: WebsiteJobKind;
   status: WebsiteJobStatus;
   createdAt: string;
   updatedAt: string;
@@ -321,6 +384,8 @@ export interface WebsiteJob {
   transcriptText: string;
   pages: WebsitePageInput[];
   prompt: string;
+  editInstructionText: string | null;
+  editTarget: WebsiteEditTargetResolution | null;
   statusDetail: string | null;
   errorMessage: string | null;
   previewImageUrl: string | null;

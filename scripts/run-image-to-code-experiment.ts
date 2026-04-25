@@ -478,6 +478,9 @@ async function main() {
   const job: WebsiteJob = {
     id: randomUUID(),
     sessionId,
+    parentJobId: null,
+    revisionNumber: 1,
+    jobKind: "initial",
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -497,6 +500,8 @@ async function main() {
       }
     ],
     prompt: clonePrompt,
+    editInstructionText: null,
+    editTarget: null,
     statusDetail: "Queued for experiment.",
     errorMessage: null,
     previewImageUrl: null,

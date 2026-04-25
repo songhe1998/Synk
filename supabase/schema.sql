@@ -104,6 +104,9 @@ create table if not exists public.world_jobs (
 create table if not exists public.website_jobs (
   id uuid primary key,
   session_id uuid not null references public.sessions (id) on delete cascade,
+  parent_job_id uuid references public.website_jobs (id) on delete set null,
+  revision_number integer not null default 1,
+  job_kind text not null default 'initial' check (job_kind in ('initial', 'edit')),
   status text not null check (status in ('queued', 'running', 'building', 'exporting', 'succeeded', 'failed')),
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now()),
@@ -115,6 +118,8 @@ create table if not exists public.website_jobs (
   transcript_text text not null,
   pages jsonb not null default '[]'::jsonb,
   prompt text not null,
+  edit_instruction_text text,
+  edit_target jsonb,
   status_detail text,
   error_message text,
   preview_image_file_name text,
@@ -133,6 +138,7 @@ create index if not exists session_assets_session_id_idx on public.session_asset
 create index if not exists video_jobs_session_id_idx on public.video_jobs (session_id, created_at desc);
 create index if not exists world_jobs_session_id_idx on public.world_jobs (session_id, created_at desc);
 create index if not exists website_jobs_session_id_idx on public.website_jobs (session_id, created_at desc);
+create index if not exists website_jobs_parent_job_id_idx on public.website_jobs (parent_job_id, created_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.sessions enable row level security;

@@ -1,7 +1,7 @@
 import { randomUUID } from "crypto";
 import { mkdir, readFile, rename, stat, writeFile } from "fs/promises";
 import path from "path";
-import { WebsiteArtifactKind, WebsiteJob } from "@/lib/types";
+import { WebsiteArtifactKind, WebsiteEditTargetResolution, WebsiteJob } from "@/lib/types";
 import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
 import {
   getWebsitePreviewMimeType,
@@ -62,12 +62,21 @@ function withWebsiteUrls(sessionId: string, job: WebsiteJob): WebsiteJob {
   return {
     ...job,
     sessionId,
+    parentJobId: job.parentJobId ?? null,
+    revisionNumber: job.revisionNumber ?? 1,
+    jobKind: job.jobKind ?? "initial",
+    editInstructionText: job.editInstructionText ?? null,
+    editTarget: normalizeEditTarget(job.editTarget),
     pages,
     previewImageUrl: getWebsiteJobAssetUrl(sessionId, job.id, "previewImage", job.previewImageFileName),
     codeArchiveUrl: getWebsiteJobAssetUrl(sessionId, job.id, "codeArchive", job.codeArchiveFileName),
     distArchiveUrl: getWebsiteJobAssetUrl(sessionId, job.id, "distArchive", job.distArchiveFileName),
     previewUrl: getWebsiteJobPreviewUrl(sessionId, job.id, job.distArchiveFileName)
   };
+}
+
+function normalizeEditTarget(value: WebsiteEditTargetResolution | null | undefined) {
+  return value ?? null;
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown) {

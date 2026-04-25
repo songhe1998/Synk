@@ -1232,6 +1232,76 @@ textarea {
   background: white;
 }
 
+.website-edit-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+  background: rgba(5, 7, 11, 0.08);
+}
+
+.website-edit-stroke {
+  fill: none;
+  stroke: rgba(255, 112, 72, 0.94);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.24));
+}
+
+.website-edit-panel {
+  position: absolute;
+  right: max(24px, env(safe-area-inset-right));
+  bottom: max(28px, env(safe-area-inset-bottom));
+  z-index: 5;
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100vw - 48px));
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 13, 17, 0.82);
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
+}
+
+.website-edit-panel textarea {
+  width: 100%;
+  min-height: 82px;
+  resize: vertical;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff7ef;
+  outline: none;
+}
+
+.website-edit-panel textarea:focus {
+  border-color: rgba(255, 124, 59, 0.56);
+  box-shadow: 0 0 0 3px rgba(255, 124, 59, 0.14);
+}
+
+.website-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.website-edit-error {
+  margin: 0;
+  color: #ffd0c8;
+  font-size: 0.88rem;
+}
+
+.website-edit-active {
+  border-color: rgba(255, 124, 59, 0.46);
+  background: rgba(255, 124, 59, 0.18);
+}
+
 .image-experience-vignette {
   position: absolute;
   inset: 0;

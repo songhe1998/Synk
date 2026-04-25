@@ -11,6 +11,9 @@ function makeJob(transcriptText: string): WebsiteJob {
   return {
     id: "job-1",
     sessionId: "session-1",
+    parentJobId: null,
+    revisionNumber: 1,
+    jobKind: "initial",
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -25,11 +28,13 @@ function makeJob(transcriptText: string): WebsiteJob {
         id: "page-1",
         title: "Main",
         path: "/",
-        sourceAssetKind: "generatedImageLabeled",
+        sourceAssetKind: "annotatedSketch",
         sketchUrl: null
       }
     ],
     prompt: "",
+    editInstructionText: null,
+    editTarget: null,
     statusDetail: null,
     errorMessage: null,
     previewImageUrl: null,

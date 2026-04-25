@@ -107,6 +107,9 @@ function makeWebsiteJob(overrides: Partial<WebsiteJob> = {}): WebsiteJob {
   return {
     id: "website-1",
     sessionId: "session-1",
+    parentJobId: null,
+    revisionNumber: 1,
+    jobKind: "initial",
     status: "succeeded",
     createdAt: "2026-04-18T10:03:00.000Z",
     updatedAt: "2026-04-18T10:05:00.000Z",
@@ -118,6 +121,8 @@ function makeWebsiteJob(overrides: Partial<WebsiteJob> = {}): WebsiteJob {
     transcriptText: "Build a website.",
     pages: [],
     prompt: "Create a website.",
+    editInstructionText: null,
+    editTarget: null,
     statusDetail: "Website ready.",
     errorMessage: null,
     previewImageUrl: "/api/sessions/session-1/websites/website-1/asset?kind=previewImage",
