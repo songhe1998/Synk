@@ -14,6 +14,7 @@ function makeJob(transcriptText: string): WebsiteJob {
     parentJobId: null,
     revisionNumber: 1,
     jobKind: "initial",
+    generationProfile: "econ",
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -33,6 +34,7 @@ function makeJob(transcriptText: string): WebsiteJob {
       }
     ],
     prompt: "",
+    providerMetadata: null,
     editInstructionText: null,
     editTarget: null,
     statusDetail: null,

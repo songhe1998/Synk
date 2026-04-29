@@ -38,6 +38,9 @@
   ],
   "exclude": [
     "node_modules",
-    "templates"
+    "templates",
+    "test-results",
+    "tmp",
+    ".cache"
   ]
 }

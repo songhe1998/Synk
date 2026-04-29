@@ -11,6 +11,7 @@ import {
   buildCodexPlannerPrompt,
   getWebsiteAssetPlanSchema
 } from "@/lib/website-asset-plan";
+import { compactWebsiteEditTargetResolutionForPrompt } from "@/lib/website-edit-targeting";
 import type { WebsiteGeneratedAsset } from "@/lib/website-preview-chain";
 import { buildWebsiteScaffoldOverrides, type WebsiteScaffoldFile } from "@/lib/website-scaffold";
 
@@ -37,6 +38,8 @@ const CODEX_REPAIR_LOG_PATH = `${ARTIFACTS_DIR}/codex-repair.log`;
 const CODEX_EDIT_LOG_PATH = `${ARTIFACTS_DIR}/codex-edit.log`;
 const DEFAULT_SANDBOX_TIMEOUT_MS = 20 * 60 * 1000;
 const SANDBOX_COMMAND_WAIT_SLICE_MS = 10 * 1000;
+const SANDBOX_FS_OPERATION_TIMEOUT_MS = Number(process.env.WEBSITE_SANDBOX_FS_TIMEOUT_MS ?? 90 * 1000);
+const SANDBOX_RESTORE_COMMAND_TIMEOUT_MS = Number(process.env.WEBSITE_SANDBOX_RESTORE_TIMEOUT_MS ?? 120 * 1000);
 const DEFAULT_CODEX_PACKAGE = process.env.CODEX_CLI_NPM_PACKAGE || "@openai/codex@0.111.0";
 const WEBSITE_CODEX_MODEL = process.env.WEBSITE_CODEX_MODEL?.trim() || "gpt-5.4";
 const WEBSITE_CODEX_CODEGEN_MODEL = process.env.WEBSITE_CODEX_CODEGEN_MODEL?.trim() || WEBSITE_CODEX_MODEL;
@@ -53,6 +56,8 @@ const WEBSITE_CODEX_PLANNER_SERVICE_TIER =
   process.env.WEBSITE_CODEX_PLANNER_SERVICE_TIER?.trim() || WEBSITE_CODEX_SERVICE_TIER;
 const SANDBOX_BASELINE_VERSION = "2026-04-21-no-playwright-v1";
 const SNAPSHOT_CACHE_PATH = path.join(process.cwd(), ".cache", "website-sandbox-snapshot.json");
+const SANDBOX_SNAPSHOT_SOURCE_TIMEOUT_MS = Number(process.env.WEBSITE_SANDBOX_SNAPSHOT_TIMEOUT_MS ?? 45 * 1000);
+const TRANSIENT_SANDBOX_RETRY_DELAYS_MS = [1000, 2500, 5000, 10000];
 
 interface LocalTemplateFile {
   relativePath: string;
@@ -92,6 +97,19 @@ export interface WebsiteRevisionSandboxRunInput {
   editRequest: {
     instructionText: string;
     targetResolution: WebsiteEditTargetResolution | null;
+    annotation?: WebsiteEditTargetResolution["annotation"] | null;
+    visualReferenceImage?: {
+      fileName: string;
+      mimeType: string;
+      buffer: Buffer;
+    } | null;
+    currentScreenshotImage?: {
+      fileName: string;
+      mimeType: string;
+      buffer: Buffer;
+    } | null;
+    qualityFeedback?: string | null;
+    finalProjectAssetsPromise?: Promise<WebsiteGeneratedAsset[]> | null;
     parentJobId: string;
     parentDisplayName: string;
   };
@@ -119,6 +137,24 @@ export interface WebsiteSandboxRunResult {
     buffer: Buffer;
     mimeType: string;
   }>;
+  debugFiles?: Array<{
+    assetPath: string;
+    buffer: Buffer;
+    mimeType: string;
+  }>;
+}
+
+export interface WebsiteProvidedSourceBuildInput {
+  job: WebsiteJob;
+  sourceFiles: Array<{
+    relativePath: string;
+    buffer: Buffer;
+  }>;
+  onProgress?: (update: {
+    status: WebsiteJobStatus;
+    statusDetail: string;
+    sandboxId?: string;
+  }) => Promise<void> | void;
 }
 
 async function collectLocalFiles(rootDir: string, relativeDir = ""): Promise<LocalTemplateFile[]> {
@@ -269,12 +305,48 @@ async function ensureWebsiteSandboxSnapshot(
   }
 }
 
+function withTimeout<T>(promise: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+  let handle: ReturnType<typeof setTimeout> | null = null;
+
+  return new Promise<T>((resolve, reject) => {
+    handle = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)} seconds.`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        if (handle) {
+          clearTimeout(handle);
+        }
+        resolve(value);
+      },
+      (error) => {
+        if (handle) {
+          clearTimeout(handle);
+        }
+        reject(error);
+      }
+    );
+  });
+}
+
 async function getSandboxCreateSource(credentials: ReturnType<typeof getVercelSandboxCredentials>) {
   if (!sandboxSnapshotPromise) {
     sandboxSnapshotPromise = ensureWebsiteSandboxSnapshot(credentials).catch(() => null);
   }
 
-  const snapshotId = await sandboxSnapshotPromise;
+  let snapshotId: string | null = null;
+  try {
+    snapshotId = await withTimeout(
+      sandboxSnapshotPromise,
+      "Preparing cached Vercel sandbox snapshot",
+      SANDBOX_SNAPSHOT_SOURCE_TIMEOUT_MS
+    );
+  } catch {
+    sandboxSnapshotPromise = null;
+    snapshotId = null;
+  }
+
   return snapshotId
     ? {
         type: "snapshot" as const,
@@ -291,23 +363,30 @@ async function runSandboxCommand(
     cwd?: string;
     env?: Record<string, string>;
     label: string;
+    timeoutMs?: number;
   }
 ) {
-  const detached = await sandbox.runCommand({
-    cmd: params.cmd,
-    args: params.args,
-    cwd: params.cwd,
-    env: params.env,
-    detached: true
-  });
+  const detached = await retrySandboxOperation(
+    `Starting sandbox command: ${params.label}`,
+    () =>
+      sandbox.runCommand({
+        cmd: params.cmd,
+        args: params.args,
+        cwd: params.cwd,
+        env: params.env,
+        detached: true
+      }),
+    { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+  );
   const credentials = getVercelSandboxCredentials();
-  const deadline = Date.now() + DEFAULT_SANDBOX_TIMEOUT_MS;
+  const commandTimeoutMs = params.timeoutMs ?? DEFAULT_SANDBOX_TIMEOUT_MS;
+  const deadline = Date.now() + commandTimeoutMs;
   let finished;
 
   while (true) {
     const remainingMs = deadline - Date.now();
     if (remainingMs <= 0) {
-      throw new Error(`${params.label} timed out after ${Math.round(DEFAULT_SANDBOX_TIMEOUT_MS / 1000)} seconds.`);
+      throw new Error(`${params.label} timed out after ${Math.round(commandTimeoutMs / 1000)} seconds.`);
     }
 
     try {
@@ -324,15 +403,25 @@ async function runSandboxCommand(
         message.includes("signal");
 
       if (!isWaitSliceTimeout) {
-        throw error;
+        if (isTransientSandboxTransportError(error)) {
+          await sleep(1500);
+          continue;
+        }
+
+        throw new Error(`Waiting for sandbox command failed: ${params.label}: ${describeVercelSandboxError(error)}`);
       }
 
-      const sandboxSnapshot = await Sandbox.get({
-        sandboxId: sandbox.sandboxId,
-        teamId: credentials.teamId,
-        projectId: credentials.projectId,
-        token: credentials.token
-      }).catch(() => null);
+      const sandboxSnapshot = await retrySandboxOperation(
+        `Checking sandbox status while waiting for ${params.label}`,
+        () =>
+          Sandbox.get({
+            sandboxId: sandbox.sandboxId,
+            teamId: credentials.teamId,
+            projectId: credentials.projectId,
+            token: credentials.token
+          }),
+        { maxAttempts: 2 }
+      ).catch(() => null);
 
       if (sandboxSnapshot && sandboxSnapshot.status !== "running" && sandboxSnapshot.status !== "pending") {
         throw new Error(
@@ -342,8 +431,12 @@ async function runSandboxCommand(
     }
   }
 
-  const stdout = await finished.stdout();
-  const stderr = await finished.stderr();
+  const stdout = await retrySandboxOperation(`Reading stdout for sandbox command: ${params.label}`, () => finished.stdout(), {
+    timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS
+  });
+  const stderr = await retrySandboxOperation(`Reading stderr for sandbox command: ${params.label}`, () => finished.stderr(), {
+    timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS
+  });
 
   if (finished.exitCode !== 0) {
     const combinedOutput = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n\n");
@@ -358,10 +451,10 @@ async function runSandboxCommand(
   };
 }
 
-async function readPreviewFiles(sandbox: Sandbox) {
+async function readPreviewFilesFromDirectory(sandbox: Sandbox, outputDir: string) {
   const { stdout } = await runSandboxCommand(sandbox, {
     cmd: "find",
-    args: ["dist", "-type", "f", "-print"],
+    args: [outputDir, "-type", "f", "-print"],
     cwd: PROJECT_DIR,
     label: "Listing website preview files"
   });
@@ -373,11 +466,13 @@ async function readPreviewFiles(sandbox: Sandbox) {
 
   const previewFiles = await Promise.all(
     relativeDistFiles.map(async (relativeDistPath) => {
-      const assetPath = relativeDistPath.replace(/^dist\//, "");
-      const buffer = await sandbox.readFileToBuffer({
-        path: relativeDistPath,
-        cwd: PROJECT_DIR
-      });
+      const assetPath = relativeDistPath.replace(new RegExp(`^${outputDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`), "");
+      const buffer = await retrySandboxOperation(`Reading preview file ${relativeDistPath}`, () =>
+        sandbox.readFileToBuffer({
+          path: relativeDistPath,
+          cwd: PROJECT_DIR
+        })
+      );
 
       if (!buffer) {
         throw new Error(`Missing website preview file ${relativeDistPath}.`);
@@ -392,6 +487,183 @@ async function readPreviewFiles(sandbox: Sandbox) {
   );
 
   return previewFiles;
+}
+
+async function readPreviewFiles(sandbox: Sandbox) {
+  return readPreviewFilesFromDirectory(sandbox, "dist");
+}
+
+function normalizeProvidedSourcePath(relativePath: string) {
+  const normalized = relativePath
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
+
+  if (
+    !normalized ||
+    normalized === "node_modules" ||
+    normalized.startsWith("node_modules/") ||
+    normalized === ".next" ||
+    normalized.startsWith(".next/") ||
+    normalized === "out" ||
+    normalized.startsWith("out/") ||
+    normalized === "dist" ||
+    normalized.startsWith("dist/")
+  ) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function parsePackageJson(sourceFiles: WebsiteProvidedSourceBuildInput["sourceFiles"]) {
+  const packageFile = sourceFiles.find((file) => normalizeProvidedSourcePath(file.relativePath) === "package.json");
+  if (!packageFile) {
+    throw new Error("v0 returned no package.json, so the website source cannot be built.");
+  }
+
+  try {
+    return JSON.parse(packageFile.buffer.toString("utf8")) as {
+      scripts?: Record<string, string>;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+  } catch (error) {
+    throw new Error(`v0 returned an invalid package.json: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function inferProvidedSourceKind(
+  sourceFiles: WebsiteProvidedSourceBuildInput["sourceFiles"]
+): "next" | "vite" | "generic" {
+  const pkg = parsePackageJson(sourceFiles);
+  const deps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+  if (deps.next) {
+    return "next";
+  }
+  if (deps.vite) {
+    return "vite";
+  }
+  return "generic";
+}
+
+function buildNextStaticExportConfig() {
+  return [
+    "/** @type {import('next').NextConfig} */",
+    "const nextConfig = {",
+    '  output: "export",',
+    "  trailingSlash: true,",
+    "  images: {",
+    "    unoptimized: true,",
+    "  },",
+    "  typescript: {",
+    "    ignoreBuildErrors: true,",
+    "  },",
+    "  eslint: {",
+    "    ignoreDuringBuilds: true,",
+    "  },",
+    "}",
+    "",
+    "export default nextConfig",
+    ""
+  ].join("\n");
+}
+
+function prepareProvidedSourceFiles(sourceFiles: WebsiteProvidedSourceBuildInput["sourceFiles"]) {
+  const sourceKind = inferProvidedSourceKind(sourceFiles);
+  const filteredFiles = sourceFiles
+    .map((file) => {
+      const relativePath = normalizeProvidedSourcePath(file.relativePath);
+      return relativePath ? { relativePath, buffer: file.buffer } : null;
+    })
+    .filter((file): file is { relativePath: string; buffer: Buffer } => Boolean(file));
+
+  if (sourceKind !== "next") {
+    return {
+      sourceKind,
+      files: filteredFiles
+    };
+  }
+
+  const withoutNextConfig = filteredFiles.filter((file) => !/^next\.config\.(js|mjs|cjs|ts)$/.test(file.relativePath));
+  return {
+    sourceKind,
+    files: [
+      ...withoutNextConfig,
+      {
+        relativePath: "next.config.mjs",
+        buffer: Buffer.from(buildNextStaticExportConfig(), "utf8")
+      }
+    ]
+  };
+}
+
+async function installAndBuildProvidedSourceProject(sandbox: Sandbox, sourceKind: "next" | "vite" | "generic") {
+  await runSandboxCommand(sandbox, {
+    cmd: "npm",
+    args: ["install", "--no-audit", "--no-fund"],
+    cwd: PROJECT_DIR,
+    env: {
+      ...buildRunEnvironment(),
+      NEXT_TELEMETRY_DISABLED: "1"
+    },
+    label: "Installing v0 website dependencies"
+  });
+
+  await runSandboxCommand(sandbox, {
+    cmd: "npm",
+    args: ["run", "build"],
+    cwd: PROJECT_DIR,
+    env: {
+      ...buildRunEnvironment(),
+      NEXT_TELEMETRY_DISABLED: "1"
+    },
+    label: "Building v0 website source"
+  });
+
+  if (sourceKind === "next") {
+    await runSandboxCommand(sandbox, {
+      cmd: "bash",
+      args: ["-lc", "test -d out && rm -rf dist && cp -R out dist"],
+      cwd: PROJECT_DIR,
+      label: "Normalizing Next static export"
+    });
+  }
+}
+
+async function rewriteStaticPreviewAssetPaths(sandbox: Sandbox) {
+  const script = [
+    'const fs = require("fs");',
+    'const path = require("path");',
+    'const root = path.join(process.cwd(), "dist");',
+    'const textFilePattern = /\\.(html|js|css|txt)$/i;',
+    "function walk(dir) {",
+    '  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {',
+    "    const full = path.join(dir, entry.name);",
+    "    if (entry.isDirectory()) walk(full);",
+    "    else if (entry.isFile() && textFilePattern.test(entry.name)) rewrite(full);",
+    "  }",
+    "}",
+    "function rewrite(file) {",
+    '  let text = fs.readFileSync(file, "utf8");',
+    "  const original = text;",
+    "  text = text",
+    "    .replace(/((?:src|href|action)=[\"'])\\/(?=(_next|images|icon|apple-icon|placeholder))/g, '$1./')",
+    "    .replace(/url\\(\\s*\\/(?=(_next|images|icon|apple-icon|placeholder))/g, 'url(./')",
+    "    .replace(/([\"'`])\\/(?=(_next|images|icon|apple-icon|placeholder))/g, '$1./')",
+    "    .replace(/(\\\\\")\\/(?=(_next|images|icon|apple-icon|placeholder))/g, '$1./');",
+    "  if (text !== original) fs.writeFileSync(file, text);",
+    "}",
+    "if (fs.existsSync(root)) walk(root);"
+  ].join("\n");
+
+  await runSandboxCommand(sandbox, {
+    cmd: "node",
+    args: ["-e", script],
+    cwd: PROJECT_DIR,
+    label: "Rewriting static preview asset paths"
+  });
 }
 
 async function createWorkspaceFiles(
@@ -626,8 +898,31 @@ function buildRepairPrompt() {
   ].join("\n");
 }
 
+function buildWebsiteEditPromptWithQualityFeedback(basePrompt: string, params: WebsiteRevisionSandboxRunInput["editRequest"]) {
+  const feedback = params.qualityFeedback?.trim();
+  if (!feedback) {
+    return basePrompt;
+  }
+
+  return [
+    basePrompt,
+    "",
+    "Automated visual QA found that the previous edit pass was not visibly sufficient.",
+    "You are now repairing the edited source already present in the workspace.",
+    "Use the annotated before screenshot to understand the original circled targets.",
+    "If /vercel/sandbox/input/current-edit-screenshot.png is attached, use it as the current after-state that still needs improvement.",
+    "Make a targeted but clearly visible improvement inside the selected regions. Do not stop at tiny spacing or token CSS tweaks if a normal user would still say nothing changed.",
+    "Visual QA feedback:",
+    feedback,
+    "",
+    "Apply the repair now and leave the project buildable."
+  ].join("\n");
+}
+
 async function readSandboxTextTail(sandbox: Sandbox, filePath: string, maxChars = 4000) {
-  const buffer = await sandbox.readFileToBuffer({ path: filePath }).catch(() => null);
+  const buffer = await retrySandboxOperation(`Reading sandbox text file ${filePath}`, () =>
+    sandbox.readFileToBuffer({ path: filePath })
+  ).catch(() => null);
   if (!buffer) {
     return null;
   }
@@ -647,6 +942,61 @@ function appendFailureContext(error: unknown, label: string, details: string | n
   }
 
   return new Error(`${message}\n\n${label}:\n${details}`);
+}
+
+async function readSandboxDebugFile(sandbox: Sandbox, filePath: string, assetPath: string, mimeType: string) {
+  const buffer = await retrySandboxOperation(`Reading sandbox debug file ${filePath}`, () =>
+    sandbox.readFileToBuffer({ path: filePath })
+  ).catch(() => null);
+
+  return buffer
+    ? {
+        assetPath,
+        buffer,
+        mimeType
+      }
+    : null;
+}
+
+async function readWebsiteEditDebugFiles(sandbox: Sandbox) {
+  const files = await Promise.all([
+    readSandboxDebugFile(sandbox, EDIT_PROMPT_PATH, "edit-prompt.txt", "text/plain; charset=utf-8"),
+    readSandboxDebugFile(sandbox, `${INPUT_DIR}/edit-request.json`, "edit-request.json", "application/json; charset=utf-8"),
+    readSandboxDebugFile(
+      sandbox,
+      `${INPUT_DIR}/target-resolution.json`,
+      "target-resolution.json",
+      "application/json; charset=utf-8"
+    ),
+    readSandboxDebugFile(sandbox, `${INPUT_DIR}/annotation.json`, "annotation.json", "application/json; charset=utf-8"),
+    readSandboxDebugFile(
+      sandbox,
+      `${INPUT_DIR}/visual-reference.json`,
+      "visual-reference.json",
+      "application/json; charset=utf-8"
+    ),
+    readSandboxDebugFile(
+      sandbox,
+      `${INPUT_DIR}/quality-feedback.txt`,
+      "quality-feedback.txt",
+      "text/plain; charset=utf-8"
+    ),
+    readSandboxDebugFile(
+      sandbox,
+      `${INPUT_DIR}/annotated-screenshot.png`,
+      "annotated-screenshot.png",
+      "image/png"
+    ),
+    readSandboxDebugFile(
+      sandbox,
+      `${INPUT_DIR}/current-edit-screenshot.png`,
+      "current-edit-screenshot.png",
+      "image/png"
+    ),
+    readSandboxDebugFile(sandbox, CODEX_EDIT_LOG_PATH, "codex-edit.log", "text/plain; charset=utf-8")
+  ]);
+
+  return files.filter((file): file is NonNullable<typeof file> => Boolean(file));
 }
 
 function describeVercelSandboxError(error: unknown) {
@@ -678,13 +1028,86 @@ function describeVercelSandboxError(error: unknown) {
   return baseMessage;
 }
 
+function isTransientSandboxTransportError(error: unknown) {
+  const message = describeVercelSandboxError(error).toLowerCase();
+  return (
+    message.includes("bad gateway") ||
+    message.includes("gateway timeout") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("fetch failed") ||
+    message.includes("socket hang up") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("websocket closed") ||
+    message.includes("stream disconnected") ||
+    message.includes("stream ended before command finished")
+  );
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retrySandboxOperation<T>(
+  label: string,
+  operation: () => Promise<T>,
+  options: { maxAttempts?: number; timeoutMs?: number } = {}
+) {
+  const maxAttempts = options.maxAttempts ?? TRANSIENT_SANDBOX_RETRY_DELAYS_MS.length + 1;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const pending = operation();
+      return options.timeoutMs ? await withTimeout(pending, label, options.timeoutMs) : await pending;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientSandboxTransportError(error) || attempt >= maxAttempts) {
+        break;
+      }
+
+      await sleep(TRANSIENT_SANDBOX_RETRY_DELAYS_MS[Math.min(attempt - 1, TRANSIENT_SANDBOX_RETRY_DELAYS_MS.length - 1)]);
+    }
+  }
+
+  throw new Error(`${label}: ${describeVercelSandboxError(lastError)}`);
+}
+
+async function makeSandboxDir(sandbox: Sandbox, dirPath: string) {
+  await retrySandboxOperation(
+    `Creating sandbox directory ${dirPath}`,
+    () => sandbox.fs.mkdir(dirPath, { recursive: true }),
+    { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+  );
+}
+
+async function removeSandboxPath(sandbox: Sandbox, targetPath: string) {
+  await retrySandboxOperation(
+    `Removing sandbox path ${targetPath}`,
+    () =>
+      sandbox.fs.rm(targetPath, {
+        recursive: true,
+        force: true
+      }),
+    { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+  );
+}
+
+async function writeSandboxFiles(sandbox: Sandbox, files: Parameters<Sandbox["writeFiles"]>[0]) {
+  await retrySandboxOperation(`Writing ${files.length} sandbox file(s)`, () => sandbox.writeFiles(files), {
+    timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS
+  });
+}
+
 async function createWebsiteSandbox(
   credentials: ReturnType<typeof getVercelSandboxCredentials>,
   source: Awaited<ReturnType<typeof getSandboxCreateSource>> | null
 ) {
-  try {
-    return source
-      ? await Sandbox.create({
+  return retrySandboxOperation("Creating Vercel sandbox", async () =>
+    source
+      ? Sandbox.create({
           ...credentials,
           source,
           timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
@@ -692,17 +1115,15 @@ async function createWebsiteSandbox(
             vcpus: 2
           }
         })
-      : await Sandbox.create({
+      : Sandbox.create({
           ...credentials,
           runtime: "node22",
           timeout: DEFAULT_SANDBOX_TIMEOUT_MS,
           resources: {
             vcpus: 2
           }
-        });
-  } catch (error) {
-    throw new Error(describeVercelSandboxError(error));
-  }
+        })
+  );
 }
 
 async function installAndBuildWebsiteProject(sandbox: Sandbox) {
@@ -740,6 +1161,115 @@ async function installAndBuildWebsiteProject(sandbox: Sandbox) {
   } catch (error) {
     const retriedMessage = error instanceof Error ? error.message : String(error);
     throw new Error(`${initialBuildError.message}\n\nRetry after npm install also failed:\n${retriedMessage}`);
+  }
+}
+
+export async function runWebsiteProvidedSourceBuildJob({
+  job,
+  sourceFiles,
+  onProgress
+}: WebsiteProvidedSourceBuildInput): Promise<WebsiteSandboxRunResult> {
+  const credentials = getVercelSandboxCredentials();
+  const source = await getSandboxCreateSource(credentials);
+  const sandbox = await createWebsiteSandbox(credentials, source);
+
+  try {
+    await onProgress?.({
+      status: "running",
+      statusDetail: "Sandbox ready. Preparing v0 website source for static preview export.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    const prepared = prepareProvidedSourceFiles(sourceFiles);
+    await removeSandboxPath(sandbox, PROJECT_DIR);
+    await makeSandboxDir(sandbox, PROJECT_DIR);
+    await makeSandboxDir(sandbox, ARTIFACTS_DIR);
+    await writeSandboxFiles(
+      sandbox,
+      prepared.files.map((file) => ({
+        path: `${PROJECT_DIR}/${file.relativePath}`,
+        content: file.buffer
+      }))
+    );
+
+    await onProgress?.({
+      status: "building",
+      statusDetail:
+        prepared.sourceKind === "next"
+          ? "Building v0 Next source and exporting it as static preview files."
+          : "Building v0 website source.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    await installAndBuildProvidedSourceProject(sandbox, prepared.sourceKind);
+    await rewriteStaticPreviewAssetPaths(sandbox);
+    await ensureStyledBuild(sandbox);
+
+    await onProgress?.({
+      status: "exporting",
+      statusDetail: "Exporting v0 website artifacts and static preview files.",
+      sandboxId: sandbox.sandboxId
+    });
+
+    const codeArchiveFileName = `website-code-${job.id}.tar.gz`;
+    const distArchiveFileName = `website-dist-${job.id}.tar.gz`;
+
+    await runSandboxCommand(sandbox, {
+      cmd: "tar",
+      args: [
+        "--exclude=./node_modules",
+        "--exclude=./.next",
+        "--exclude=./out",
+        "--exclude=./dist",
+        "-czf",
+        `${ARTIFACTS_DIR}/${codeArchiveFileName}`,
+        "."
+      ],
+      cwd: PROJECT_DIR,
+      label: "Archiving v0 website source"
+    });
+
+    await runSandboxCommand(sandbox, {
+      cmd: "tar",
+      args: ["-czf", `${ARTIFACTS_DIR}/${distArchiveFileName}`, "dist"],
+      cwd: PROJECT_DIR,
+      label: "Archiving v0 website static preview"
+    });
+
+    const [codeArchiveBuffer, distArchiveBuffer, previewFiles] = await Promise.all([
+      retrySandboxOperation(
+        `Reading v0 source archive ${codeArchiveFileName}`,
+        () => sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${codeArchiveFileName}` }),
+        { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+      ),
+      retrySandboxOperation(
+        `Reading v0 static preview archive ${distArchiveFileName}`,
+        () => sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${distArchiveFileName}` }),
+        { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+      ),
+      readPreviewFiles(sandbox)
+    ]);
+
+    if (!codeArchiveBuffer || !distArchiveBuffer) {
+      throw new Error("v0 source build finished without returning website archives.");
+    }
+
+    return {
+      sandboxId: sandbox.sandboxId,
+      codeArchive: {
+        buffer: codeArchiveBuffer,
+        fileName: codeArchiveFileName,
+        mimeType: "application/gzip"
+      },
+      distArchive: {
+        buffer: distArchiveBuffer,
+        fileName: distArchiveFileName,
+        mimeType: "application/gzip"
+      },
+      previewFiles
+    };
+  } finally {
+    await sandbox.stop({ blocking: true }).catch(() => undefined);
   }
 }
 
@@ -971,21 +1501,25 @@ export async function runWebsiteRevisionSandboxJob({
   try {
     await onProgress?.({
       status: "running",
-      statusDetail: "Sandbox ready. Restoring the previous website source.",
+      statusDetail: "Sandbox ready. Uploading edit inputs and previous website source.",
       sandboxId: sandbox.sandboxId
     });
 
     const authJson = await readCodexAuthJson();
-    await sandbox.fs.mkdir(INPUT_DIR, { recursive: true });
-    await sandbox.fs.mkdir(ARTIFACTS_DIR, { recursive: true });
-    await sandbox.writeFiles([
+    const compactTargetResolution = editRequest.targetResolution
+      ? compactWebsiteEditTargetResolutionForPrompt(editRequest.targetResolution)
+      : null;
+    const effectiveEditPrompt = buildWebsiteEditPromptWithQualityFeedback(job.prompt, editRequest);
+    await makeSandboxDir(sandbox, INPUT_DIR);
+    await makeSandboxDir(sandbox, ARTIFACTS_DIR);
+    await writeSandboxFiles(sandbox, [
       {
         path: `${INPUT_DIR}/parent-code.tar.gz`,
         content: parentCodeArchive
       },
       {
         path: EDIT_PROMPT_PATH,
-        content: Buffer.from(job.prompt, "utf8")
+        content: Buffer.from(effectiveEditPrompt, "utf8")
       },
       {
         path: `${INPUT_DIR}/edit-request.json`,
@@ -1006,13 +1540,69 @@ export async function runWebsiteRevisionSandboxJob({
       },
       {
         path: `${INPUT_DIR}/target-resolution.json`,
-        content: Buffer.from(JSON.stringify(editRequest.targetResolution, null, 2), "utf8")
+        content: Buffer.from(JSON.stringify(compactTargetResolution, null, 2), "utf8")
       },
+      {
+        path: `${INPUT_DIR}/annotation.json`,
+        content: Buffer.from(
+          JSON.stringify(compactTargetResolution?.annotation ?? null, null, 2),
+          "utf8"
+        )
+      },
+      ...(editRequest.visualReferenceImage
+        ? [
+            {
+              path: `${INPUT_DIR}/annotated-screenshot.png`,
+              content: editRequest.visualReferenceImage.buffer
+            }
+          ]
+        : []),
+      ...(editRequest.currentScreenshotImage
+        ? [
+            {
+              path: `${INPUT_DIR}/current-edit-screenshot.png`,
+              content: editRequest.currentScreenshotImage.buffer
+            }
+          ]
+        : []),
+      ...(editRequest.visualReferenceImage
+        ? [
+            {
+              path: `${INPUT_DIR}/visual-reference.json`,
+              content: Buffer.from(
+                JSON.stringify(
+                  {
+                    fileName: editRequest.visualReferenceImage.fileName,
+                    mimeType: editRequest.visualReferenceImage.mimeType,
+                    path: `${INPUT_DIR}/annotated-screenshot.png`
+                  },
+                  null,
+                  2
+                ),
+                "utf8"
+              )
+            }
+          ]
+        : []),
+      ...(editRequest.qualityFeedback?.trim()
+        ? [
+            {
+              path: `${INPUT_DIR}/quality-feedback.txt`,
+              content: Buffer.from(editRequest.qualityFeedback.trim(), "utf8")
+            }
+          ]
+        : []),
       {
         path: CODEX_AUTH_PATH,
         content: Buffer.from(authJson, "utf8")
       }
     ]);
+
+    await onProgress?.({
+      status: "running",
+      statusDetail: "Restoring the previous website source archive.",
+      sandboxId: sandbox.sandboxId
+    });
 
     await runSandboxCommand(sandbox, {
       cmd: "bash",
@@ -1024,7 +1614,8 @@ export async function runWebsiteRevisionSandboxJob({
           `tar -xzf ${shellEscape(`${INPUT_DIR}/parent-code.tar.gz`)} -C ${shellEscape(PROJECT_DIR)}`
         ].join(" && ")
       ],
-      label: "Restoring website source archive"
+      label: "Restoring website source archive",
+      timeoutMs: SANDBOX_RESTORE_COMMAND_TIMEOUT_MS
     });
 
     await onProgress?.({
@@ -1035,7 +1626,17 @@ export async function runWebsiteRevisionSandboxJob({
 
     await runSandboxCommand(sandbox, {
       cmd: "bash",
-      args: ["-lc", buildCodexShellCommand(EDIT_PROMPT_PATH, [], CODEX_EDIT_LOG_PATH)],
+      args: [
+        "-lc",
+        buildCodexShellCommand(
+          EDIT_PROMPT_PATH,
+          [
+            ...(editRequest.visualReferenceImage ? [`${INPUT_DIR}/annotated-screenshot.png`] : []),
+            ...(editRequest.currentScreenshotImage ? [`${INPUT_DIR}/current-edit-screenshot.png`] : [])
+          ],
+          CODEX_EDIT_LOG_PATH
+        )
+      ],
       env: buildRunEnvironment(),
       label: "Codex website edit"
     }).catch(async (error) => {
@@ -1043,10 +1644,27 @@ export async function runWebsiteRevisionSandboxJob({
       throw appendFailureContext(error, "Codex edit log tail", details);
     });
 
-    await sandbox.fs.rm(CODEX_HOME_ROOT, {
-      recursive: true,
-      force: true
-    });
+    await removeSandboxPath(sandbox, CODEX_HOME_ROOT);
+
+    if (editRequest.finalProjectAssetsPromise) {
+      await onProgress?.({
+        status: "building",
+        statusDetail: "Waiting for replacement imagery and swapping edited image assets into the project.",
+        sandboxId: sandbox.sandboxId
+      });
+
+      const finalProjectAssets = await editRequest.finalProjectAssetsPromise;
+      if (finalProjectAssets.length) {
+        await makeSandboxDir(sandbox, GENERATED_ASSETS_DIR);
+        await writeSandboxFiles(
+          sandbox,
+          finalProjectAssets.map((asset) => ({
+            path: `${GENERATED_ASSETS_DIR}/${asset.fileName}`,
+            content: asset.buffer
+          }))
+        );
+      }
+    }
 
     await onProgress?.({
       status: "building",
@@ -1088,10 +1706,19 @@ export async function runWebsiteRevisionSandboxJob({
       label: "Archiving edited website dist"
     });
 
-    const [codeArchiveBuffer, distArchiveBuffer, previewFiles] = await Promise.all([
-      sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${codeArchiveFileName}` }),
-      sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${distArchiveFileName}` }),
-      readPreviewFiles(sandbox)
+    const [codeArchiveBuffer, distArchiveBuffer, previewFiles, debugFiles] = await Promise.all([
+      retrySandboxOperation(
+        `Reading edited source archive ${codeArchiveFileName}`,
+        () => sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${codeArchiveFileName}` }),
+        { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+      ),
+      retrySandboxOperation(
+        `Reading edited dist archive ${distArchiveFileName}`,
+        () => sandbox.readFileToBuffer({ path: `${ARTIFACTS_DIR}/${distArchiveFileName}` }),
+        { timeoutMs: SANDBOX_FS_OPERATION_TIMEOUT_MS }
+      ),
+      readPreviewFiles(sandbox),
+      readWebsiteEditDebugFiles(sandbox)
     ]);
 
     if (!codeArchiveBuffer || !distArchiveBuffer) {
@@ -1110,7 +1737,8 @@ export async function runWebsiteRevisionSandboxJob({
         fileName: distArchiveFileName,
         mimeType: "application/gzip"
       },
-      previewFiles
+      previewFiles,
+      debugFiles
     };
   } finally {
     await sandbox.stop({ blocking: true }).catch(() => undefined);

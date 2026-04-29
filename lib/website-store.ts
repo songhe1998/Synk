@@ -65,6 +65,8 @@ function withWebsiteUrls(sessionId: string, job: WebsiteJob): WebsiteJob {
     parentJobId: job.parentJobId ?? null,
     revisionNumber: job.revisionNumber ?? 1,
     jobKind: job.jobKind ?? "initial",
+    generationProfile: job.generationProfile ?? "econ",
+    providerMetadata: job.providerMetadata ?? null,
     editInstructionText: job.editInstructionText ?? null,
     editTarget: normalizeEditTarget(job.editTarget),
     pages,

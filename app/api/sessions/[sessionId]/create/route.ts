@@ -9,6 +9,7 @@ import {
   ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
+  WebsiteGenerationProfile,
   VideoModelPreset,
   VideoPipelineMode
 } from "@/lib/types";
@@ -46,6 +47,10 @@ function parseVideoModelPreset(value: unknown): VideoModelPreset {
 
 function parseVideoPipelineMode(value: unknown): VideoPipelineMode {
   return value === "dynamic" ? "dynamic" : "normal";
+}
+
+function parseWebsiteGenerationProfile(value: unknown): WebsiteGenerationProfile {
+  return value === "econ" ? "econ" : "fast";
 }
 
 function getStatusCode(message: string) {
@@ -86,6 +91,7 @@ export async function POST(
   const imageFollowMode = parseImageFollowMode(body?.imageFollowMode);
   const videoModelPreset = parseVideoModelPreset(body?.videoModelPreset);
   const videoPipelineMode = parseVideoPipelineMode(body?.videoPipelineMode);
+  const websiteGenerationProfile = parseWebsiteGenerationProfile(body?.websiteGenerationProfile);
 
   try {
     if (target === "image") {
@@ -126,7 +132,8 @@ export async function POST(
           })
         : target === "website"
           ? await startWebsiteGenerationJob({
-              sessionId
+              sessionId,
+              generationProfile: websiteGenerationProfile
             })
           : await startVideoGenerationJob({
               sessionId,

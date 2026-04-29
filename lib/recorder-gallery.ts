@@ -223,7 +223,10 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
       ? job?.errorMessage || "Website generation failed."
       : ready
         ? "Website ready."
-        : job?.statusDetail || "Generating a website directly from the labeled sketch.",
+        : job?.statusDetail ||
+          (job?.generationProfile === "fast"
+            ? "Generating a website with v0 from the target preview."
+            : "Generating a website directly from the labeled sketch."),
     jobId: job?.id ?? null
   };
 }

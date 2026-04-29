@@ -2,6 +2,7 @@ import { requireApiViewer } from "@/lib/auth-route";
 import { getSessionDetail } from "@/lib/session-store";
 import { startWebsiteGenerationJob, syncWebsiteGenerationJob } from "@/lib/website-pipeline";
 import { getWebsiteJob, listWebsiteJobs } from "@/lib/website-store";
+import { WebsiteGenerationProfile } from "@/lib/types";
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,10 @@ function getWebsiteStartErrorStatus(message: string) {
   }
 
   return 500;
+}
+
+function parseWebsiteGenerationProfile(value: unknown): WebsiteGenerationProfile {
+  return value === "econ" ? "econ" : "fast";
 }
 
 export async function GET(
@@ -44,7 +49,7 @@ export async function GET(
 }
 
 export async function POST(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params;
@@ -59,8 +64,10 @@ export async function POST(
   }
 
   try {
+    const body = await request.json().catch(() => ({}));
     const job = await startWebsiteGenerationJob({
-      sessionId
+      sessionId,
+      generationProfile: parseWebsiteGenerationProfile(body?.websiteGenerationProfile)
     });
 
     if (job.status === "failed") {

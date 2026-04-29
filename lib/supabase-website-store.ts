@@ -10,6 +10,10 @@ import {
   normalizeWebsitePreviewAssetPath
 } from "@/lib/website-artifacts";
 
+const SUPABASE_WEBSITE_REQUEST_TIMEOUT_MS = Number(process.env.SUPABASE_WEBSITE_REQUEST_TIMEOUT_MS ?? 45 * 1000);
+const SUPABASE_WEBSITE_STORAGE_TIMEOUT_MS = Number(process.env.SUPABASE_WEBSITE_STORAGE_TIMEOUT_MS ?? 90 * 1000);
+const TRANSIENT_SUPABASE_WEBSITE_RETRY_DELAYS_MS = [1000, 2500, 5000];
+
 interface SessionOwnerRow {
   user_id: string;
 }
@@ -20,6 +24,7 @@ interface WebsiteJobRow {
   parent_job_id: string | null;
   revision_number: number | null;
   job_kind: WebsiteJob["jobKind"] | null;
+  generation_profile: WebsiteJob["generationProfile"] | null;
   status: WebsiteJob["status"];
   created_at: string;
   updated_at: string;
@@ -31,6 +36,7 @@ interface WebsiteJobRow {
   transcript_text: string;
   pages: WebsiteJob["pages"];
   prompt: string;
+  provider_metadata: Record<string, unknown> | null;
   edit_instruction_text: string | null;
   edit_target: WebsiteEditTargetResolution | null;
   status_detail: string | null;
@@ -67,6 +73,7 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
     parentJobId: row.parent_job_id ?? null,
     revisionNumber: row.revision_number ?? 1,
     jobKind: row.job_kind === "edit" ? "edit" : "initial",
+    generationProfile: row.generation_profile === "fast" ? "fast" : "econ",
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -78,6 +85,7 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
     transcriptText: row.transcript_text,
     pages,
     prompt: row.prompt,
+    providerMetadata: row.provider_metadata ?? null,
     editInstructionText: row.edit_instruction_text ?? null,
     editTarget: row.edit_target ?? null,
     statusDetail: row.status_detail,
@@ -115,9 +123,11 @@ function toWebsiteJobRow(
     framework: job.framework,
     sandbox_provider: job.sandboxProvider,
     sandbox_id: job.sandboxId,
+    generation_profile: job.generationProfile ?? "econ",
     transcript_text: job.transcriptText,
     pages: job.pages,
     prompt: job.prompt,
+    provider_metadata: job.providerMetadata ?? null,
     status_detail: job.statusDetail,
     error_message: job.errorMessage,
     preview_image_file_name: job.previewImageFileName,
@@ -144,7 +154,9 @@ function toWebsiteJobRow(
 
 async function getSessionOwner(sessionId: string) {
   const admin = getSupabaseAdminClient();
-  const { data, error } = await admin.from("sessions").select("user_id").eq("id", sessionId).single<SessionOwnerRow>();
+  const { data, error } = await retrySupabaseWebsiteOperation("Read session owner", () =>
+    admin.from("sessions").select("user_id").eq("id", sessionId).single<SessionOwnerRow>()
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -154,17 +166,98 @@ async function getSessionOwner(sessionId: string) {
 }
 
 function getPreviewStoragePath(ownerId: string, sessionId: string, jobId: string, assetPath: string) {
-  return path.posix.join(ownerId, sessionId, "websites", jobId, "preview", assetPath);
+  return path.posix.join(ownerId, sessionId, "websites", jobId, "preview", toStorageSafePreviewAssetPath(assetPath));
+}
+
+function toStorageSafePreviewAssetPath(assetPath: string) {
+  return assetPath
+    .split("/")
+    .map((segment) =>
+      segment.replace(/[^A-Za-z0-9._-]/g, (character) =>
+        Array.from(character)
+          .map((part) => `_x${part.codePointAt(0)?.toString(16) ?? "0"}_`)
+          .join("")
+      )
+    )
+    .join("/");
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTransientSupabaseWebsiteError(error: unknown) {
+  const message = getErrorMessage(error).toLowerCase();
+  return (
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("fetch failed") ||
+    message.includes("network") ||
+    message.includes("bad gateway") ||
+    message.includes("gateway timeout") ||
+    message.includes("service unavailable") ||
+    message.includes("502") ||
+    message.includes("503") ||
+    message.includes("504") ||
+    message.includes("socket hang up") ||
+    message.includes("econnreset") ||
+    message.includes("etimedout") ||
+    message.includes("terminated")
+  );
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function withSupabaseWebsiteTimeout<T>(promise: PromiseLike<T>, label: string, timeoutMs: number) {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<T>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([Promise.resolve(promise), timeoutPromise]).finally(() => {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  });
+}
+
+async function retrySupabaseWebsiteOperation<T>(
+  label: string,
+  operation: () => PromiseLike<T>,
+  timeoutMs = SUPABASE_WEBSITE_REQUEST_TIMEOUT_MS
+) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= TRANSIENT_SUPABASE_WEBSITE_RETRY_DELAYS_MS.length; attempt += 1) {
+    try {
+      return await withSupabaseWebsiteTimeout(operation(), label, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      const canRetry = attempt < TRANSIENT_SUPABASE_WEBSITE_RETRY_DELAYS_MS.length && isTransientSupabaseWebsiteError(error);
+      if (!canRetry) {
+        throw error;
+      }
+      await wait(TRANSIENT_SUPABASE_WEBSITE_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`${label} failed.`);
 }
 
 async function getJobRow(sessionId: string, jobId: string) {
   const admin = getSupabaseAdminClient();
-  const { data, error } = await admin
-    .from("website_jobs")
-    .select("*")
-    .eq("session_id", sessionId)
-    .eq("id", jobId)
-    .maybeSingle<WebsiteJobRow>();
+  const { data, error } = await retrySupabaseWebsiteOperation("Read website job row", () =>
+    admin
+      .from("website_jobs")
+      .select("*")
+      .eq("session_id", sessionId)
+      .eq("id", jobId)
+      .maybeSingle<WebsiteJobRow>()
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -175,11 +268,13 @@ async function getJobRow(sessionId: string, jobId: string) {
 
 export async function listSupabaseWebsiteJobs(sessionId: string) {
   const admin = getSupabaseAdminClient();
-  const { data, error } = await admin
-    .from("website_jobs")
-    .select("*")
-    .eq("session_id", sessionId)
-    .order("created_at", { ascending: false });
+  const { data, error } = await retrySupabaseWebsiteOperation("List website jobs", () =>
+    admin
+      .from("website_jobs")
+      .select("*")
+      .eq("session_id", sessionId)
+      .order("created_at", { ascending: false })
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -221,17 +316,19 @@ export async function createSupabaseWebsiteJob(
   };
 
   const admin = getSupabaseAdminClient();
-  const { data, error } = await admin
-    .from("website_jobs")
-    .insert(
-      toWebsiteJobRow(sessionId, nextJob, {
-        previewImageStoragePath: null,
-        codeArchiveStoragePath: null,
-        distArchiveStoragePath: null
-      })
-    )
-    .select("*")
-    .single<WebsiteJobRow>();
+  const { data, error } = await retrySupabaseWebsiteOperation("Create website job", () =>
+    admin
+      .from("website_jobs")
+      .insert(
+        toWebsiteJobRow(sessionId, nextJob, {
+          previewImageStoragePath: null,
+          codeArchiveStoragePath: null,
+          distArchiveStoragePath: null
+        })
+      )
+      .select("*")
+      .single<WebsiteJobRow>()
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -257,19 +354,21 @@ export async function updateSupabaseWebsiteJob(
   };
 
   const admin = getSupabaseAdminClient();
-  const { data, error } = await admin
-    .from("website_jobs")
-    .update(
-      toWebsiteJobRow(sessionId, nextJob, {
-        previewImageStoragePath: currentRow.preview_image_storage_path,
-        codeArchiveStoragePath: currentRow.code_archive_storage_path,
-        distArchiveStoragePath: currentRow.dist_archive_storage_path
-      })
-    )
-    .eq("session_id", sessionId)
-    .eq("id", jobId)
-    .select("*")
-    .single<WebsiteJobRow>();
+  const { data, error } = await retrySupabaseWebsiteOperation("Update website job", () =>
+    admin
+      .from("website_jobs")
+      .update(
+        toWebsiteJobRow(sessionId, nextJob, {
+          previewImageStoragePath: currentRow.preview_image_storage_path,
+          codeArchiveStoragePath: currentRow.code_archive_storage_path,
+          distArchiveStoragePath: currentRow.dist_archive_storage_path
+        })
+      )
+      .eq("session_id", sessionId)
+      .eq("id", jobId)
+      .select("*")
+      .single<WebsiteJobRow>()
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -293,14 +392,20 @@ export async function saveSupabaseWebsiteJobArtifact(
   const storagePath = `${ownerId}/${sessionId}/websites/${jobId}/${artifact.fileName}`;
   const bucket = getSupabaseStorageBucket();
 
-  const { error: uploadError } = await admin.storage.from(bucket).upload(storagePath, artifact.buffer, {
-    contentType: artifact.mimeType,
-    upsert: true
-  });
+  await retrySupabaseWebsiteOperation(
+    `Upload website ${artifact.kind} artifact`,
+    async () => {
+      const { error } = await admin.storage.from(bucket).upload(storagePath, artifact.buffer, {
+        contentType: artifact.mimeType,
+        upsert: true
+      });
 
-  if (uploadError) {
-    throw normalizeSupabaseError(uploadError);
-  }
+      if (error) {
+        throw normalizeSupabaseError(error);
+      }
+    },
+    SUPABASE_WEBSITE_STORAGE_TIMEOUT_MS
+  );
 
   const patch =
     artifact.kind === "previewImage"
@@ -321,16 +426,18 @@ export async function saveSupabaseWebsiteJobArtifact(
             dist_archive_storage_path: storagePath
           };
 
-  const { data, error } = await admin
-    .from("website_jobs")
-    .update({
-      ...patch,
-      updated_at: new Date().toISOString()
-    })
-    .eq("session_id", sessionId)
-    .eq("id", jobId)
-    .select("*")
-    .single<WebsiteJobRow>();
+  const { data, error } = await retrySupabaseWebsiteOperation("Update website artifact metadata", () =>
+    admin
+      .from("website_jobs")
+      .update({
+        ...patch,
+        updated_at: new Date().toISOString()
+      })
+      .eq("session_id", sessionId)
+      .eq("id", jobId)
+      .select("*")
+      .single<WebsiteJobRow>()
+  );
 
   if (error) {
     throw normalizeSupabaseError(error);
@@ -394,14 +501,20 @@ export async function saveSupabaseWebsitePreviewFiles(
     }
 
     const storagePath = getPreviewStoragePath(ownerId, sessionId, jobId, normalizedPath);
-    const { error } = await admin.storage.from(bucket).upload(storagePath, file.buffer, {
-      contentType: getWebsitePreviewMimeType(normalizedPath),
-      upsert: true
-    });
+    await retrySupabaseWebsiteOperation(
+      `Upload website preview file ${normalizedPath}`,
+      async () => {
+        const { error } = await admin.storage.from(bucket).upload(storagePath, file.buffer, {
+          contentType: getWebsitePreviewMimeType(normalizedPath),
+          upsert: true
+        });
 
-    if (error) {
-      throw normalizeSupabaseError(error);
-    }
+        if (error) {
+          throw normalizeSupabaseError(error);
+        }
+      },
+      SUPABASE_WEBSITE_STORAGE_TIMEOUT_MS
+    );
   }
 }
 

@@ -1,20 +1,38 @@
-const WEBSITE_SANDBOX_SETUP_MESSAGE =
-  "Website sandbox is not configured yet. Add VERCEL_TEAM_ID, VERCEL_PROJECT_ID, and VERCEL_TOKEN, then restart the dev server.";
+import { getV0ApiKeySetupError } from "@/lib/v0-config";
+
+const REQUIRED_WEBSITE_ENV_KEYS = [
+  "OPENAI_API_KEY",
+  "VERCEL_TEAM_ID",
+  "VERCEL_PROJECT_ID",
+  "VERCEL_TOKEN"
+] as const;
+
+export function getMissingWebsiteConfigKeys() {
+  return REQUIRED_WEBSITE_ENV_KEYS.filter((key) => !process.env[key]?.trim());
+}
 
 export function hasWebsiteSandboxConfig() {
-  return Boolean(
-    process.env.VERCEL_TEAM_ID &&
-      process.env.VERCEL_PROJECT_ID &&
-      process.env.VERCEL_TOKEN
-  );
+  return getMissingWebsiteConfigKeys().length === 0 && getV0ApiKeySetupError() === null;
 }
 
 export function getWebsiteSandboxSetupMessage() {
-  return WEBSITE_SANDBOX_SETUP_MESSAGE;
+  const missingKeys = getMissingWebsiteConfigKeys();
+  const v0SetupError = getV0ApiKeySetupError();
+  if (missingKeys.length === 0 && !v0SetupError) {
+    return null;
+  }
+  if (missingKeys.length === 0 && v0SetupError) {
+    return v0SetupError;
+  }
+  const suffix = v0SetupError ? ` ${v0SetupError}` : "";
+  return `Website generation is not configured yet. Missing ${missingKeys.join(
+    ", "
+  )}. Add the missing value${missingKeys.length === 1 ? "" : "s"}, then restart the dev server.${suffix}`;
 }
 
 export function requireWebsiteSandboxConfig() {
-  if (!hasWebsiteSandboxConfig()) {
-    throw new Error(WEBSITE_SANDBOX_SETUP_MESSAGE);
+  const setupMessage = getWebsiteSandboxSetupMessage();
+  if (setupMessage) {
+    throw new Error(setupMessage);
   }
 }

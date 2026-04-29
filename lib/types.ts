@@ -29,11 +29,12 @@ export type VideoSourceAssetKind =
 export type VideoResolution = "480p" | "720p" | "1080p";
 export type VideoAspectRatio = "21:9" | "16:9" | "4:3" | "1:1" | "3:4" | "9:16";
 export type WebsiteJobStatus = "queued" | "running" | "building" | "exporting" | "succeeded" | "failed";
-export type WebsiteFramework = "vite-react";
+export type WebsiteFramework = "vite-react" | "next-react";
 export type WebsiteSandboxProvider = "vercel";
 export type WebsiteArtifactKind = "previewImage" | "codeArchive" | "distArchive";
 export type WebsiteSourceAssetKind = "annotatedSketch";
 export type WebsiteJobKind = "initial" | "edit";
+export type WebsiteGenerationProfile = "fast" | "econ";
 
 export type DrawingEvent =
   | {
@@ -318,11 +319,14 @@ export interface WebsiteEditRect {
 export interface WebsiteEditPoint {
   x: number;
   y: number;
+  tMs?: number;
 }
 
 export interface WebsiteEditStroke {
   id: string;
   points: WebsiteEditPoint[];
+  startMs?: number | null;
+  endMs?: number | null;
 }
 
 export interface WebsiteEditAnnotation {
@@ -344,6 +348,8 @@ export interface WebsiteEditDomCandidate {
   text: string | null;
   ariaLabel: string | null;
   className: string | null;
+  imageSrcs?: string[];
+  imageAlts?: string[];
   rect: WebsiteEditRect;
 }
 
@@ -353,8 +359,67 @@ export interface WebsiteEditTargetCandidate {
   tagName: string;
   role: string | null;
   text: string | null;
+  imageSrcs?: string[];
+  imageAlts?: string[];
   rect: WebsiteEditRect;
   score: number;
+  reason: string;
+}
+
+export type WebsiteEditIntentType =
+  | "local_edit"
+  | "bulk_style_change"
+  | "swap_order"
+  | "move_relative"
+  | "copy_style"
+  | "remove"
+  | "emphasize"
+  | "unknown";
+
+export interface WebsiteEditMention {
+  id: string;
+  text: string;
+  startMs: number | null;
+  endMs: number | null;
+  startChar: number;
+  endChar: number;
+  startTokenIndex?: number | null;
+  endTokenIndex?: number | null;
+  source?: "llm" | "rule";
+  kind: "singular" | "plural";
+  targetCount: number | null;
+}
+
+export interface WebsiteEditIntent {
+  id: string;
+  type: WebsiteEditIntentType;
+  operation: string;
+  targetMentionIds: string[];
+  expectedTargetCount: number | null;
+  confidence: number;
+  reason: string;
+}
+
+export interface WebsiteEditResolvedTarget {
+  id: string;
+  strokeId: string;
+  strokeIndex: number;
+  mentionIds: string[];
+  intentIds: string[];
+  role: "target" | "moved_item" | "anchor" | "reference";
+  targetElementId: string | null;
+  targetSelector: string | null;
+  targetDescription: string;
+  confidence: number;
+  candidates: WebsiteEditTargetCandidate[];
+  bbox: WebsiteEditRect;
+  reason: string;
+}
+
+export interface WebsiteEditMentionBinding {
+  mentionId: string;
+  strokeIds: string[];
+  confidence: number;
   reason: string;
 }
 
@@ -365,6 +430,17 @@ export interface WebsiteEditTargetResolution {
   confidence: number;
   reason: string;
   candidates: WebsiteEditTargetCandidate[];
+  mode?: "single" | "multi";
+  intentParser?: {
+    source: "llm" | "rule" | "fallback";
+    model: string | null;
+    error: string | null;
+  };
+  annotation?: WebsiteEditAnnotation;
+  mentions?: WebsiteEditMention[];
+  mentionBindings?: WebsiteEditMentionBinding[];
+  intents?: WebsiteEditIntent[];
+  targets?: WebsiteEditResolvedTarget[];
 }
 
 export interface WebsiteJob {
@@ -373,6 +449,7 @@ export interface WebsiteJob {
   parentJobId: string | null;
   revisionNumber: number;
   jobKind: WebsiteJobKind;
+  generationProfile: WebsiteGenerationProfile;
   status: WebsiteJobStatus;
   createdAt: string;
   updatedAt: string;
@@ -384,6 +461,7 @@ export interface WebsiteJob {
   transcriptText: string;
   pages: WebsitePageInput[];
   prompt: string;
+  providerMetadata: Record<string, unknown> | null;
   editInstructionText: string | null;
   editTarget: WebsiteEditTargetResolution | null;
   statusDetail: string | null;

@@ -481,6 +481,7 @@ async function main() {
     parentJobId: null,
     revisionNumber: 1,
     jobKind: "initial",
+    generationProfile: "econ",
     status: "queued",
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -500,6 +501,7 @@ async function main() {
       }
     ],
     prompt: clonePrompt,
+    providerMetadata: null,
     editInstructionText: null,
     editTarget: null,
     statusDetail: "Queued for experiment.",

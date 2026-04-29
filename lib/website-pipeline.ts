@@ -14,17 +14,20 @@ import { getSessionAsset, getSessionDetail } from "@/lib/session-store";
 import {
   WebsiteEditAnnotation,
   WebsiteEditDomCandidate,
+  WebsiteEditTargetCandidate,
   WebsiteEditTargetResolution,
-  WebsiteJob
+  WebsiteJob,
+  TranscriptToken
 } from "@/lib/types";
 import { requireWebsiteSandboxConfig } from "@/lib/website-config";
 import {
   runWebsiteAssetPlanner,
+  runWebsiteProvidedSourceBuildJob,
   runWebsiteRevisionSandboxJob,
   runWebsiteSandboxJob
 } from "@/lib/website-sandbox";
 import { readCodexAuthJson } from "@/lib/codex-auth";
-import { buildWebsiteEditPrompt, resolveWebsiteEditTarget } from "@/lib/website-edit-targeting";
+import { buildWebsiteEditPrompt, resolveWebsiteEditTargetsWithIntentParser } from "@/lib/website-edit-targeting";
 import {
   buildPreviewDrivenClonePrompt,
   createWebsitePlaceholderAssets,
@@ -33,11 +36,27 @@ import {
   hasOpenAiApiKey
 } from "@/lib/website-preview-chain";
 import {
+  captureWebsitePreviewScreenshot,
+  reviewWebsiteEditVisualQuality,
+  shouldRunWebsiteEditVisualQa,
+  type WebsiteEditVisualReview
+} from "@/lib/website-edit-visual-qa";
+import {
   buildWebsiteBlueprintOverrides,
   inferWebsiteScaffoldFamily,
   inferWebsiteScaffoldVariant
 } from "@/lib/website-scaffold";
 import type { WebsiteAssetPlan } from "@/lib/website-asset-plan";
+import {
+  buildV0WebsiteEditPrompt,
+  buildV0WebsiteGenerationPrompt,
+  createV0WebsiteChat,
+  getV0WebsiteVersionSourceFiles,
+  readV0WebsiteState,
+  requireV0WebsiteConfig,
+  sendV0WebsiteEditMessage,
+  writeV0WebsiteStateMetadata
+} from "@/lib/v0-website";
 
 const websiteJobRuns = new Map<string, Promise<WebsiteJob>>();
 
@@ -1273,6 +1292,18 @@ function buildWebsitePrompt(
 function isRetryableWebsiteGenerationError(message: string) {
   const lower = message.toLowerCase();
   return (
+    lower.includes("bad gateway") ||
+    lower.includes("gateway timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("timeout") ||
+    lower.includes("502") ||
+    lower.includes("503") ||
+    lower.includes("504") ||
+    lower.includes("fetch failed") ||
+    lower.includes("network") ||
+    lower.includes("socket hang up") ||
+    lower.includes("econnreset") ||
+    lower.includes("etimedout") ||
     lower.includes("currently experiencing high demand") ||
     lower.includes("stream disconnected before completion") ||
     lower.includes("stream ended before command finished") ||
@@ -1286,6 +1317,209 @@ function isRetryableWebsiteGenerationError(message: string) {
 
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function hasWebsiteEditImageIntent(instructionText: string) {
+  const instruction = instructionText.toLowerCase();
+  return [
+    "image",
+    "photo",
+    "picture",
+    "visual",
+    "realistic",
+    "different",
+    "same",
+    "ugly",
+    "replace",
+    "change the image",
+    "change this image",
+    "图片",
+    "照片",
+    "图",
+    "真实",
+    "换图",
+    "不一样",
+    "一样",
+    "难看"
+  ].some((keyword) => instruction.includes(keyword));
+}
+
+function imageSrcToGeneratedAssetFileName(src: string) {
+  if (!src) {
+    return null;
+  }
+
+  let pathname = src;
+  try {
+    pathname = new URL(src, "http://localhost").pathname;
+  } catch {
+    pathname = src.split(/[?#]/)[0] ?? src;
+  }
+
+  const decoded = decodeURIComponent(pathname);
+  const baseName = decoded.split("/").filter(Boolean).pop();
+  if (!baseName || !/\.(png|jpe?g|webp)$/i.test(baseName)) {
+    return null;
+  }
+
+  const extension = baseName.match(/\.(png|jpe?g|webp)$/i)?.[0].toLowerCase() ?? ".png";
+  const name = baseName.slice(0, -extension.length);
+  if (!name || name.startsWith("index")) {
+    return null;
+  }
+
+  const sourceName = name.replace(/-[A-Za-z0-9_-]{6,}$/, "");
+  return `${sourceName || name}.png`;
+}
+
+function assetNameToComponentName(fileName: string) {
+  return fileName.replace(/\.(png|jpe?g|webp)$/i, "");
+}
+
+function inferWebsiteEditAssetAspectRatio(fileName: string, candidate: WebsiteEditTargetCandidate | null) {
+  const lower = fileName.toLowerCase();
+  if (lower.includes("avatar") || lower.includes("profile") || lower.includes("headshot") || lower.includes("logo")) {
+    return "square" as const;
+  }
+
+  const rect = candidate?.rect;
+  if (rect && rect.width > 0 && rect.height > 0) {
+    const ratio = rect.width / rect.height;
+    if (ratio >= 1.18) {
+      return "landscape" as const;
+    }
+    if (ratio <= 0.82) {
+      return "portrait" as const;
+    }
+  }
+
+  return "square" as const;
+}
+
+function buildWebsiteEditAssetPrompt(params: {
+  fileName: string;
+  instructionText: string;
+  candidate: WebsiteEditTargetCandidate | null;
+  targetDescription: string;
+}) {
+  const lower = params.fileName.toLowerCase();
+  const context = [
+    params.targetDescription,
+    params.candidate?.text,
+    params.candidate?.imageAlts?.join("; ")
+  ]
+    .filter(Boolean)
+    .join(" | ");
+  const specializedGuidance = lower.includes("avatar")
+    ? "Create a cohesive 3 by 2 contact sheet of six distinct realistic professional driver headshots, varied faces, neutral backgrounds, consistent lighting, no text, no UI chrome. The site may crop different positions from this single sprite, so make each region visually distinct."
+    : lower.includes("map")
+      ? "Create a polished realistic logistics operations map image for a web dashboard: recognizable city-map texture, route lines, pins, soft green operational overlays, believable depth, no readable text, no browser chrome."
+      : "Create a replacement website image asset that is visibly different from the existing one while matching the surrounding product UI style. Make it realistic, polished, and usable as an embedded site image. No readable text, no signatures, no browser chrome.";
+
+  return [
+    specializedGuidance,
+    `User edit request: ${params.instructionText.trim()}`,
+    `Target context: ${context || "image-like website region"}`,
+    `Replacement asset filename: ${params.fileName}`,
+    "Keep the image clean enough to sit inside an existing React/CSS layout. Avoid adding captions, labels, or UI controls unless the target is specifically a map-like dashboard graphic."
+  ].join("\n");
+}
+
+function collectWebsiteEditImageAssetComponents(params: {
+  instructionText: string;
+  targetResolution: WebsiteEditTargetResolution | null;
+}) {
+  const { instructionText, targetResolution } = params;
+  if (!targetResolution || !hasOpenAiApiKey() || !hasWebsiteEditImageIntent(instructionText)) {
+    return [];
+  }
+
+  const candidatesByAsset = new Map<
+    string,
+    {
+      candidate: WebsiteEditTargetCandidate | null;
+      targetDescription: string;
+    }
+  >();
+
+  const addCandidate = (candidate: WebsiteEditTargetCandidate | null, targetDescription: string) => {
+    candidate?.imageSrcs?.forEach((src) => {
+      const fileName = imageSrcToGeneratedAssetFileName(src);
+      if (!fileName || candidatesByAsset.has(fileName)) {
+        return;
+      }
+      candidatesByAsset.set(fileName, {
+        candidate,
+        targetDescription
+      });
+    });
+  };
+
+  targetResolution.targets?.forEach((target) => {
+    target.candidates.slice(0, 3).forEach((candidate) => addCandidate(candidate, target.targetDescription));
+  });
+  targetResolution.candidates.slice(0, 6).forEach((candidate) =>
+    addCandidate(candidate, targetResolution.targetDescription)
+  );
+
+  return Array.from(candidatesByAsset.entries())
+    .slice(0, 3)
+    .map(([fileName, entry]) => ({
+      name: assetNameToComponentName(fileName),
+      role: `Replacement asset for ${fileName}`,
+      rationale: "The user circled an image-like website region and requested a visual/image change.",
+      target_description: entry.targetDescription,
+      prompt: buildWebsiteEditAssetPrompt({
+        fileName,
+        instructionText,
+        candidate: entry.candidate,
+        targetDescription: entry.targetDescription
+      }),
+      aspect_ratio: inferWebsiteEditAssetAspectRatio(fileName, entry.candidate)
+    }));
+}
+
+function createWebsiteEditImageAssetsPromise(params: {
+  instructionText: string;
+  targetResolution: WebsiteEditTargetResolution | null;
+}) {
+  const imageryComponents = collectWebsiteEditImageAssetComponents(params);
+  if (!imageryComponents.length) {
+    return null;
+  }
+
+  const assetPlan: WebsiteAssetPlan = {
+    shared_style_language:
+      "Replacement website edit imagery should look realistic, polished, product-ready, and consistent with the existing generated website.",
+    route_strategy: "single-page",
+    shell_style: "Existing website shell; only selected image-like assets are being replaced.",
+    primary_sections: [
+      {
+        name: "Edited image assets",
+        purpose: "Provide direct replacement imagery for the selected website regions.",
+        emphasis: "primary"
+      }
+    ],
+    priority_primitives: [],
+    implementation_notes: [
+      "Generated assets replace existing files in src/generated-assets before the edited website build runs."
+    ],
+    code_components: [],
+    imagery_components: imageryComponents
+  };
+
+  return generateWebsiteImageryAssets(assetPlan);
+}
+
+const STALE_WEBSITE_JOB_RESUME_MS = Number(process.env.STALE_WEBSITE_JOB_RESUME_MS ?? 10 * 60 * 1000);
+
+function isStaleWebsiteJob(job: WebsiteJob) {
+  const updatedAtMs = new Date(job.updatedAt).getTime();
+  if (!Number.isFinite(updatedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - updatedAtMs >= STALE_WEBSITE_JOB_RESUME_MS;
 }
 
 function shouldUseCodeOnlyProductFastPath(transcriptText: string) {
@@ -1398,7 +1632,174 @@ function buildDirectProductClonePrompt(transcriptText: string) {
   ].join("\n");
 }
 
-async function runWebsiteGenerationJob(sessionId: string, jobId: string) {
+async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
+  const existingJob = await getWebsiteJob(sessionId, jobId);
+  if (!existingJob) {
+    throw new Error("Website job not found");
+  }
+
+  const primaryPage = existingJob.pages[0];
+  const sketchAsset = await getSessionAsset(sessionId, primaryPage.sourceAssetKind);
+  if (!sketchAsset) {
+    throw new Error("Annotated sketch is required for website generation.");
+  }
+
+  const session = await getRequiredSession(sessionId);
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Generating website target preview for v0. (attempt ${attempt}/${maxAttempts})`
+            : "Generating website target preview for v0.",
+        errorMessage: null
+      }));
+
+      const generatedPreview = await generateWebsitePreviewFromSketch({
+        transcriptText: existingJob.transcriptText,
+        sketchBuffer: sketchAsset.buffer,
+        width: session.canvasWidth,
+        height: session.canvasHeight
+      });
+
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "previewImage",
+        buffer: generatedPreview.buffer,
+        fileName: `website-preview-${jobId}.png`,
+        mimeType: "image/png"
+      });
+
+      const prompt = buildV0WebsiteGenerationPrompt(existingJob.transcriptText);
+      await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        prompt,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Sending target preview to v0 fast website generation. (attempt ${attempt}/${maxAttempts})`
+            : "Sending target preview to v0 fast website generation.",
+        errorMessage: null
+      }));
+
+      const v0State = await createV0WebsiteChat({
+        message: prompt,
+        targetPreviewImage: generatedPreview.buffer,
+        metadata: {
+          source: "synk-product-website-fast",
+          sessionId,
+          jobId,
+          phase: "generation"
+        }
+      });
+
+      if (!v0State.versionId) {
+        throw new Error("v0 finished without returning a website version id.");
+      }
+
+      const versionSource = await getV0WebsiteVersionSourceFiles(v0State.chatId, v0State.versionId);
+      const sourceState = {
+        ...v0State,
+        timings: {
+          ...v0State.timings,
+          ...versionSource.timings
+        },
+        fileCount: versionSource.fileCount,
+        decodedAssetPaths: versionSource.decodedAssetPaths
+      };
+      const sourceJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        providerMetadata: writeV0WebsiteStateMetadata(current.providerMetadata, sourceState),
+        status: "building",
+        statusDetail:
+          maxAttempts > 1
+            ? `Building v0 source into a same-origin static preview. (attempt ${attempt}/${maxAttempts})`
+            : "Building v0 source into a same-origin static preview.",
+        errorMessage: null
+      }));
+
+      const result = await runWebsiteProvidedSourceBuildJob({
+        job: sourceJob,
+        sourceFiles: versionSource.sourceFiles,
+        onProgress: async ({ status, statusDetail, sandboxId }) => {
+          await updateWebsiteJob(sessionId, jobId, (current) => ({
+            ...current,
+            status,
+            sandboxId: sandboxId ?? current.sandboxId,
+            statusDetail:
+              maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail,
+            errorMessage: null
+          }));
+        }
+      });
+
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "codeArchive",
+        ...result.codeArchive
+      });
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "distArchive",
+        ...result.distArchive
+      });
+      await saveWebsitePreviewFiles(
+        sessionId,
+        jobId,
+        result.previewFiles.map((file) => ({
+          assetPath: file.assetPath,
+          buffer: file.buffer
+        }))
+      );
+
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "succeeded",
+        sandboxId: result.sandboxId,
+        providerMetadata: writeV0WebsiteStateMetadata(current.providerMetadata, sourceState),
+        completedAt: new Date().toISOString(),
+        errorMessage: null,
+        statusDetail:
+          maxAttempts > 1
+            ? `Fast website preview is ready. Completed on attempt ${attempt}.`
+            : "Fast website preview is ready."
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Fast website generation failed.";
+      const canRetry = attempt < maxAttempts && isRetryableWebsiteGenerationError(message);
+
+      if (canRetry) {
+        await updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          status: "queued",
+          errorMessage: null,
+          statusDetail: `Transient fast website generation error. Retrying attempt ${attempt + 1}/${maxAttempts}...`
+        }));
+        await wait(attempt * 4000);
+        continue;
+      }
+
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: message,
+        statusDetail: "Fast website generation failed."
+      }));
+    }
+  }
+
+  return updateWebsiteJob(sessionId, jobId, (current) => ({
+    ...current,
+    status: "failed",
+    completedAt: new Date().toISOString(),
+    errorMessage: "Fast website generation exhausted all retry attempts.",
+    statusDetail: "Fast website generation failed."
+  }));
+}
+
+async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
   const existingJob = await getWebsiteJob(sessionId, jobId);
   if (!existingJob) {
     throw new Error("Website job not found");
@@ -1677,7 +2078,225 @@ function getNextWebsiteRevisionNumber(jobs: WebsiteJob[], parentJob: WebsiteJob)
   return Math.max(parentJob.revisionNumber ?? 1, ...jobs.map((job) => job.revisionNumber ?? 1)) + 1;
 }
 
-async function runWebsiteEditJob(sessionId: string, jobId: string) {
+function prefixWebsiteDebugFiles(
+  files: NonNullable<Awaited<ReturnType<typeof runWebsiteRevisionSandboxJob>>["debugFiles"]>,
+  prefix: string
+) {
+  return files.map((file) => ({
+    ...file,
+    assetPath: `_debug/${prefix}/${file.assetPath}`
+  }));
+}
+
+function buildWebsiteEditRepairFeedback(review: WebsiteEditVisualReview) {
+  return [
+    `Visual QA score: ${review.score.toFixed(2)}`,
+    review.issues.length ? `Issues:\n${review.issues.map((issue) => `- ${issue}`).join("\n")}` : "Issues: none listed.",
+    review.repairInstruction ? `Repair instruction:\n${review.repairInstruction}` : null
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+async function maybeReviewWebsiteEditResult({
+  instructionText,
+  targetResolution,
+  visualReferenceImage,
+  previewFiles
+}: {
+  instructionText: string;
+  targetResolution: WebsiteEditTargetResolution | null;
+  visualReferenceImage: { buffer: Buffer; fileName: string; mimeType: string } | null;
+  previewFiles: Awaited<ReturnType<typeof runWebsiteRevisionSandboxJob>>["previewFiles"];
+}) {
+  if (!visualReferenceImage || !targetResolution?.annotation || !shouldRunWebsiteEditVisualQa()) {
+    return {
+      afterScreenshot: null as Buffer | null,
+      review: null as WebsiteEditVisualReview | null
+    };
+  }
+
+  const afterScreenshot = await captureWebsitePreviewScreenshot({
+    previewFiles,
+    viewportWidth: targetResolution.annotation.viewportWidth,
+    viewportHeight: targetResolution.annotation.viewportHeight
+  });
+  const review = await reviewWebsiteEditVisualQuality({
+    instructionText,
+    targetResolution,
+    annotatedBeforeImage: visualReferenceImage.buffer,
+    afterImage: afterScreenshot
+  });
+
+  return {
+    afterScreenshot,
+    review
+  };
+}
+
+async function runWebsiteFastEditJob(sessionId: string, jobId: string) {
+  const editJob = await getWebsiteJob(sessionId, jobId);
+  if (!editJob) {
+    throw new Error("Website edit job not found");
+  }
+
+  if (!editJob.parentJobId) {
+    throw new Error("Website edit job is missing its parent job.");
+  }
+
+  const parentJob = await getWebsiteJob(sessionId, editJob.parentJobId);
+  if (!parentJob) {
+    throw new Error("Parent website job not found.");
+  }
+
+  if (parentJob.status !== "succeeded" || !parentJob.distArchiveFileName || !parentJob.codeArchiveFileName) {
+    throw new Error("Parent website must be ready before it can be edited.");
+  }
+
+  const parentV0State = readV0WebsiteState(parentJob);
+  if (!parentV0State?.chatId) {
+    throw new Error("Parent fast website is missing its v0 chat context.");
+  }
+
+  const visualReferenceImage = await getWebsiteJobArtifact(sessionId, editJob.id, "previewImage");
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const runningJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Sending targeted edit to the existing v0 chat. (attempt ${attempt}/${maxAttempts})`
+            : "Sending targeted edit to the existing v0 chat.",
+        errorMessage: null
+      }));
+
+      const prompt =
+        runningJob.prompt ||
+        buildV0WebsiteEditPrompt({
+          instructionText: runningJob.editInstructionText ?? "",
+          targetResolution: runningJob.editTarget
+        });
+
+      const nextV0State = await sendV0WebsiteEditMessage({
+        chatId: parentV0State.chatId,
+        message: prompt,
+        annotatedScreenshot: visualReferenceImage,
+        metadata: {
+          source: "synk-product-website-fast",
+          sessionId,
+          jobId,
+          parentJobId: parentJob.id,
+          phase: "edit"
+        }
+      });
+
+      if (!nextV0State.versionId) {
+        throw new Error("v0 edit finished without returning a website version id.");
+      }
+
+      const versionSource = await getV0WebsiteVersionSourceFiles(nextV0State.chatId, nextV0State.versionId);
+      const sourceState = {
+        ...nextV0State,
+        timings: {
+          ...nextV0State.timings,
+          ...versionSource.timings
+        },
+        fileCount: versionSource.fileCount,
+        decodedAssetPaths: versionSource.decodedAssetPaths
+      };
+      const sourceJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        providerMetadata: writeV0WebsiteStateMetadata(current.providerMetadata, sourceState),
+        status: "building",
+        statusDetail:
+          maxAttempts > 1
+            ? `Building edited v0 source into a same-origin static preview. (attempt ${attempt}/${maxAttempts})`
+            : "Building edited v0 source into a same-origin static preview.",
+        errorMessage: null
+      }));
+
+      const result = await runWebsiteProvidedSourceBuildJob({
+        job: sourceJob,
+        sourceFiles: versionSource.sourceFiles,
+        onProgress: async ({ status, statusDetail, sandboxId }) => {
+          await updateWebsiteJob(sessionId, jobId, (current) => ({
+            ...current,
+            status,
+            sandboxId: sandboxId ?? current.sandboxId,
+            statusDetail:
+              maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail,
+            errorMessage: null
+          }));
+        }
+      });
+
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "codeArchive",
+        ...result.codeArchive
+      });
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "distArchive",
+        ...result.distArchive
+      });
+      await saveWebsitePreviewFiles(
+        sessionId,
+        jobId,
+        result.previewFiles.map((file) => ({
+          assetPath: file.assetPath,
+          buffer: file.buffer
+        }))
+      );
+
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "succeeded",
+        sandboxId: result.sandboxId,
+        providerMetadata: writeV0WebsiteStateMetadata(current.providerMetadata, sourceState),
+        completedAt: new Date().toISOString(),
+        errorMessage: null,
+        statusDetail:
+          maxAttempts > 1
+            ? `Fast website edit is ready. Completed on attempt ${attempt}.`
+            : "Fast website edit is ready."
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Fast website edit failed.";
+      const canRetry = attempt < maxAttempts && isRetryableWebsiteGenerationError(message);
+
+      if (canRetry) {
+        await updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          status: "queued",
+          errorMessage: null,
+          statusDetail: `Transient fast website edit error. Retrying attempt ${attempt + 1}/${maxAttempts}...`
+        }));
+        await wait(attempt * 4000);
+        continue;
+      }
+
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: message,
+        statusDetail: "Fast website edit failed."
+      }));
+    }
+  }
+
+  return updateWebsiteJob(sessionId, jobId, (current) => ({
+    ...current,
+    status: "failed",
+    completedAt: new Date().toISOString(),
+    errorMessage: "Fast website edit exhausted all retry attempts.",
+    statusDetail: "Fast website edit failed."
+  }));
+}
+
+async function runWebsiteEconEditJob(sessionId: string, jobId: string) {
   const editJob = await getWebsiteJob(sessionId, jobId);
   if (!editJob) {
     throw new Error("Website edit job not found");
@@ -1700,70 +2319,247 @@ async function runWebsiteEditJob(sessionId: string, jobId: string) {
   if (!parentCodeArchive) {
     throw new Error("Parent website source archive is required for editing.");
   }
+  const visualReferenceImage = await getWebsiteJobArtifact(sessionId, editJob.id, "previewImage");
 
-  try {
-    const runningJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
-      ...current,
-      status: "running",
-      statusDetail: "Preparing the existing website source for a targeted edit.",
-      errorMessage: null
-    }));
+  const maxAttempts = 3;
 
-    const result = await runWebsiteRevisionSandboxJob({
-      job: runningJob,
-      parentCodeArchive: parentCodeArchive.buffer,
-      editRequest: {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const runningJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "running",
+        statusDetail:
+          maxAttempts > 1
+            ? `Preparing the existing website source for a targeted edit. (attempt ${attempt}/${maxAttempts})`
+            : "Preparing the existing website source for a targeted edit.",
+        errorMessage: null
+      }));
+
+      const finalProjectAssetsPromise = createWebsiteEditImageAssetsPromise({
         instructionText: runningJob.editInstructionText ?? "",
-        targetResolution: runningJob.editTarget,
-        parentJobId: parentJob.id,
-        parentDisplayName: parentJob.displayName
-      },
-      onProgress: async ({ status, statusDetail, sandboxId }) => {
+        targetResolution: runningJob.editTarget
+      });
+
+      const formatAttemptStatus = (statusDetail: string) =>
+        maxAttempts > 1 ? `${statusDetail} (attempt ${attempt}/${maxAttempts})` : statusDetail;
+
+      let result = await runWebsiteRevisionSandboxJob({
+        job: runningJob,
+        parentCodeArchive: parentCodeArchive.buffer,
+        editRequest: {
+          instructionText: runningJob.editInstructionText ?? "",
+          targetResolution: runningJob.editTarget,
+          annotation: runningJob.editTarget?.annotation ?? null,
+          visualReferenceImage,
+          finalProjectAssetsPromise,
+          parentJobId: parentJob.id,
+          parentDisplayName: parentJob.displayName
+        },
+        onProgress: async ({ status, statusDetail, sandboxId }) => {
+          await updateWebsiteJob(sessionId, jobId, (current) => ({
+            ...current,
+            status,
+            sandboxId: sandboxId ?? current.sandboxId,
+            statusDetail: formatAttemptStatus(statusDetail),
+            errorMessage: null
+          }));
+        }
+      });
+      const debugFiles = [...prefixWebsiteDebugFiles(result.debugFiles ?? [], "pass-1")];
+
+      try {
+        const firstReview = await maybeReviewWebsiteEditResult({
+          instructionText: runningJob.editInstructionText ?? "",
+          targetResolution: runningJob.editTarget,
+          visualReferenceImage,
+          previewFiles: result.previewFiles
+        });
+
+        if (firstReview.afterScreenshot) {
+          debugFiles.push({
+            assetPath: "_debug/pass-1/after-screenshot.png",
+            buffer: firstReview.afterScreenshot,
+            mimeType: "image/png"
+          });
+        }
+        if (firstReview.review) {
+          debugFiles.push({
+            assetPath: "_debug/pass-1/visual-review.json",
+            buffer: Buffer.from(JSON.stringify(firstReview.review, null, 2), "utf8"),
+            mimeType: "application/json; charset=utf-8"
+          });
+        }
+
+        const failedReview = firstReview.review?.available && !firstReview.review.passes ? firstReview.review : null;
+        if (failedReview && firstReview.afterScreenshot) {
+          await updateWebsiteJob(sessionId, jobId, (current) => ({
+            ...current,
+            status: "running",
+            sandboxId: result.sandboxId,
+            statusDetail: formatAttemptStatus(
+              `Visual QA scored the edit ${failedReview.score.toFixed(2)} and requested a targeted repair.`
+            ),
+            errorMessage: null
+          }));
+
+          const repairFeedback = buildWebsiteEditRepairFeedback(failedReview);
+          const repairJob = {
+            ...runningJob,
+            prompt: buildWebsiteEditPrompt({
+              parentJob,
+              instructionText: runningJob.editInstructionText ?? "",
+              targetResolution: runningJob.editTarget as WebsiteEditTargetResolution,
+              qualityFeedback: repairFeedback
+            })
+          };
+          const repairResult = await runWebsiteRevisionSandboxJob({
+            job: repairJob,
+            parentCodeArchive: result.codeArchive.buffer,
+            editRequest: {
+              instructionText: runningJob.editInstructionText ?? "",
+              targetResolution: runningJob.editTarget,
+              annotation: runningJob.editTarget?.annotation ?? null,
+              visualReferenceImage,
+              currentScreenshotImage: {
+                buffer: firstReview.afterScreenshot,
+                fileName: "current-edit-screenshot.png",
+                mimeType: "image/png"
+              },
+              qualityFeedback: repairFeedback,
+              finalProjectAssetsPromise: null,
+              parentJobId: parentJob.id,
+              parentDisplayName: parentJob.displayName
+            },
+            onProgress: async ({ status, statusDetail, sandboxId }) => {
+              await updateWebsiteJob(sessionId, jobId, (current) => ({
+                ...current,
+                status,
+                sandboxId: sandboxId ?? current.sandboxId,
+                statusDetail: formatAttemptStatus(`Repair pass: ${statusDetail}`),
+                errorMessage: null
+              }));
+            }
+          });
+
+          debugFiles.push(...prefixWebsiteDebugFiles(repairResult.debugFiles ?? [], "pass-2"));
+          result = repairResult;
+
+          const secondReview = await maybeReviewWebsiteEditResult({
+            instructionText: runningJob.editInstructionText ?? "",
+            targetResolution: runningJob.editTarget,
+            visualReferenceImage,
+            previewFiles: result.previewFiles
+          });
+          if (secondReview.afterScreenshot) {
+            debugFiles.push({
+              assetPath: "_debug/pass-2/after-screenshot.png",
+              buffer: secondReview.afterScreenshot,
+              mimeType: "image/png"
+            });
+          }
+          if (secondReview.review) {
+            debugFiles.push({
+              assetPath: "_debug/pass-2/visual-review.json",
+              buffer: Buffer.from(JSON.stringify(secondReview.review, null, 2), "utf8"),
+              mimeType: "application/json; charset=utf-8"
+            });
+          }
+        }
+      } catch (visualQaError) {
+        debugFiles.push({
+          assetPath: "_debug/visual-qa-error.txt",
+          buffer: Buffer.from(visualQaError instanceof Error ? visualQaError.message : String(visualQaError), "utf8"),
+          mimeType: "text/plain; charset=utf-8"
+        });
+      }
+
+      const updateExportStatus = async (statusDetail: string) => {
         await updateWebsiteJob(sessionId, jobId, (current) => ({
           ...current,
-          status,
-          sandboxId: sandboxId ?? current.sandboxId,
-          statusDetail,
+          status: "exporting",
+          sandboxId: result.sandboxId,
+          statusDetail: formatAttemptStatus(statusDetail),
           errorMessage: null
         }));
+      };
+
+      await updateExportStatus("Saving edited source archive.");
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "codeArchive",
+        ...result.codeArchive
+      });
+      await updateExportStatus("Saving edited build archive.");
+      await saveWebsiteJobArtifact(sessionId, jobId, {
+        kind: "distArchive",
+        ...result.distArchive
+      });
+      await updateExportStatus(`Saving ${result.previewFiles.length} edited preview files.`);
+      await saveWebsitePreviewFiles(
+        sessionId,
+        jobId,
+        [
+          ...result.previewFiles.map((file) => ({
+            assetPath: file.assetPath,
+            buffer: file.buffer
+          })),
+          ...debugFiles.map((file) => ({
+            assetPath: file.assetPath,
+            buffer: file.buffer
+          }))
+        ]
+      );
+
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "succeeded",
+        sandboxId: result.sandboxId,
+        completedAt: new Date().toISOString(),
+        errorMessage: null,
+        statusDetail: maxAttempts > 1 ? `Website edit is ready. Completed on attempt ${attempt}.` : "Website edit is ready."
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Website edit failed.";
+      const canRetry = attempt < maxAttempts && isRetryableWebsiteGenerationError(message);
+
+      if (canRetry) {
+        await updateWebsiteJob(sessionId, jobId, (current) => ({
+          ...current,
+          status: "queued",
+          errorMessage: null,
+          statusDetail: `Transient website edit transport error. Retrying attempt ${attempt + 1}/${maxAttempts}...`
+        }));
+        await wait(attempt * 4000);
+        continue;
       }
-    });
 
-    await saveWebsiteJobArtifact(sessionId, jobId, {
-      kind: "codeArchive",
-      ...result.codeArchive
-    });
-    await saveWebsiteJobArtifact(sessionId, jobId, {
-      kind: "distArchive",
-      ...result.distArchive
-    });
-    await saveWebsitePreviewFiles(
-      sessionId,
-      jobId,
-      result.previewFiles.map((file) => ({
-        assetPath: file.assetPath,
-        buffer: file.buffer
-      }))
-    );
-
-    return updateWebsiteJob(sessionId, jobId, (current) => ({
-      ...current,
-      status: "succeeded",
-      sandboxId: result.sandboxId,
-      completedAt: new Date().toISOString(),
-      errorMessage: null,
-      statusDetail: "Website edit is ready."
-    }));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Website edit failed.";
-    return updateWebsiteJob(sessionId, jobId, (current) => ({
-      ...current,
-      status: "failed",
-      completedAt: new Date().toISOString(),
-      errorMessage: message,
-      statusDetail: "Website edit failed."
-    }));
+      return updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "failed",
+        completedAt: new Date().toISOString(),
+        errorMessage: message,
+        statusDetail: "Website edit failed."
+      }));
+    }
   }
+
+  return updateWebsiteJob(sessionId, jobId, (current) => ({
+    ...current,
+    status: "failed",
+    completedAt: new Date().toISOString(),
+    errorMessage: "Website edit exhausted all retry attempts.",
+    statusDetail: "Website edit failed."
+  }));
+}
+
+async function runWebsiteEditJob(sessionId: string, jobId: string) {
+  const job = await getWebsiteJob(sessionId, jobId);
+  if (!job) {
+    throw new Error("Website edit job not found");
+  }
+
+  return job.generationProfile === "fast"
+    ? runWebsiteFastEditJob(sessionId, jobId)
+    : runWebsiteEconEditJob(sessionId, jobId);
 }
 
 async function runWebsiteJob(sessionId: string, jobId: string) {
@@ -1774,7 +2570,9 @@ async function runWebsiteJob(sessionId: string, jobId: string) {
 
   return job.jobKind === "edit"
     ? runWebsiteEditJob(sessionId, jobId)
-    : runWebsiteGenerationJob(sessionId, jobId);
+    : job.generationProfile === "fast"
+      ? runWebsiteFastGenerationJob(sessionId, jobId)
+      : runWebsiteEconGenerationJob(sessionId, jobId);
 }
 
 function queueWebsiteJobRun(sessionId: string, jobId: string) {
@@ -1796,20 +2594,36 @@ export async function startWebsiteEditJob({
   parentJobId,
   instructionText,
   annotation,
-  domCandidates
+  domCandidates,
+  transcriptTokens,
+  visualReferenceImage
 }: {
   sessionId: string;
   parentJobId: string;
   instructionText: string;
   annotation: WebsiteEditAnnotation;
   domCandidates: WebsiteEditDomCandidate[];
+  transcriptTokens?: TranscriptToken[] | null;
+  visualReferenceImage?: {
+    buffer: Buffer;
+    fileName: string;
+    mimeType: string;
+  } | null;
 }) {
   requireWebsiteSandboxConfig();
-  await readCodexAuthJson();
 
   const parentJob = await getWebsiteJob(sessionId, parentJobId);
   if (!parentJob) {
     throw new Error("Parent website job not found.");
+  }
+
+  if (parentJob.generationProfile === "fast") {
+    requireV0WebsiteConfig();
+    if (!readV0WebsiteState(parentJob)?.chatId) {
+      throw new Error("Parent fast website is missing its v0 chat context.");
+    }
+  } else {
+    await readCodexAuthJson();
   }
 
   if (parentJob.status !== "succeeded" || !parentJob.distArchiveUrl || !parentJob.codeArchiveUrl) {
@@ -1825,23 +2639,33 @@ export async function startWebsiteEditJob({
     throw new Error("A drawn annotation is required before editing the website.");
   }
 
-  const targetResolution: WebsiteEditTargetResolution = resolveWebsiteEditTarget({
+  const targetResolution: WebsiteEditTargetResolution = await resolveWebsiteEditTargetsWithIntentParser({
     instructionText: trimmedInstruction,
     annotation,
-    domCandidates
+    domCandidates,
+    transcriptTokens
   });
 
-  if (!targetResolution.targetElementId || targetResolution.confidence < 0.12) {
+  const hasResolvedTarget =
+    Boolean(targetResolution.targetElementId) ||
+    Boolean(targetResolution.targets?.some((target) => target.targetElementId));
+  if (!hasResolvedTarget || targetResolution.confidence < 0.12) {
     throw new Error("Could not identify a website element from the annotation.");
   }
 
   const jobs = await listWebsiteJobs(sessionId);
   const revisionNumber = getNextWebsiteRevisionNumber(jobs, parentJob);
-  const prompt = buildWebsiteEditPrompt({
-    parentJob,
-    instructionText: trimmedInstruction,
-    targetResolution
-  });
+  const prompt =
+    parentJob.generationProfile === "fast"
+      ? buildV0WebsiteEditPrompt({
+          instructionText: trimmedInstruction,
+          targetResolution
+        })
+      : buildWebsiteEditPrompt({
+          parentJob,
+          instructionText: trimmedInstruction,
+          targetResolution
+        });
 
   const job = await createWebsiteJob(sessionId, {
     parentJobId: parentJob.id,
@@ -1853,35 +2677,52 @@ export async function startWebsiteEditJob({
     framework: parentJob.framework,
     sandboxProvider: parentJob.sandboxProvider,
     sandboxId: null,
+    generationProfile: parentJob.generationProfile,
     transcriptText: parentJob.transcriptText,
     pages: parentJob.pages,
     prompt,
+    providerMetadata: parentJob.generationProfile === "fast" ? parentJob.providerMetadata : null,
     editInstructionText: trimmedInstruction,
     editTarget: targetResolution,
     statusDetail: "Queued for targeted website edit.",
     errorMessage: null,
-    previewImageFileName: parentJob.previewImageFileName,
-    previewImageMimeType: parentJob.previewImageMimeType,
+    previewImageFileName: null,
+    previewImageMimeType: null,
     codeArchiveFileName: null,
     codeArchiveMimeType: null,
     distArchiveFileName: null,
     distArchiveMimeType: null
   });
 
-  void queueWebsiteJobRun(sessionId, job.id);
-  return job;
+  const queuedJob = visualReferenceImage
+    ? await saveWebsiteJobArtifact(sessionId, job.id, {
+        kind: "previewImage",
+        buffer: visualReferenceImage.buffer,
+        fileName: visualReferenceImage.fileName,
+        mimeType: visualReferenceImage.mimeType
+      })
+    : job;
+
+  void queueWebsiteJobRun(sessionId, queuedJob.id);
+  return queuedJob;
 }
 
 export async function startWebsiteGenerationJob({
-  sessionId
+  sessionId,
+  generationProfile = "fast"
 }: {
   sessionId: string;
+  generationProfile?: WebsiteJob["generationProfile"];
 }) {
   requireWebsiteSandboxConfig();
   if (!hasOpenAiApiKey()) {
     throw new Error("OPENAI_API_KEY is required for website preview generation.");
   }
-  await readCodexAuthJson();
+  if (generationProfile === "fast") {
+    requireV0WebsiteConfig();
+  } else {
+    await readCodexAuthJson();
+  }
 
   const session = await ensureSessionAnalysis({
     sessionId
@@ -1913,15 +2754,20 @@ export async function startWebsiteGenerationJob({
     status: "queued",
     completedAt: null,
     displayName: buildWebsiteDisplayName(session.title),
-    framework: "vite-react",
+    framework: generationProfile === "fast" ? "next-react" : "vite-react",
     sandboxProvider: "vercel",
     sandboxId: null,
+    generationProfile,
     transcriptText,
     pages,
     prompt: "",
+    providerMetadata: null,
     editInstructionText: null,
     editTarget: null,
-    statusDetail: "Queued for preview-first website generation.",
+    statusDetail:
+      generationProfile === "fast"
+        ? "Queued for fast v0 website generation."
+        : "Queued for econ Codex website generation.",
     errorMessage: null,
     previewImageFileName: null,
     previewImageMimeType: null,
@@ -1935,7 +2781,10 @@ export async function startWebsiteGenerationJob({
     ...current,
     displayName: buildWebsiteDisplayName(session.title).slice(0, 80),
     prompt: "",
-    statusDetail: "Queued for preview-first website generation."
+    statusDetail:
+      generationProfile === "fast"
+        ? "Queued for fast v0 website generation."
+        : "Queued for econ Codex website generation."
   }));
 
   void queueWebsiteJobRun(sessionId, job.id);
@@ -1952,11 +2801,19 @@ export async function syncWebsiteGenerationJob(sessionId: string, jobId: string)
     return job;
   }
 
-  // Only resume explicitly queued jobs. Running/building/exporting jobs may be
-  // owned by another process or sandbox, and blindly queueing them here can
-  // duplicate the same website generation across processes.
-  if (job.status === "queued") {
+  const runKey = getRunKey(sessionId, jobId);
+  const hasLocalRun = websiteJobRuns.has(runKey);
+  if (job.status === "queued" || (!hasLocalRun && isStaleWebsiteJob(job))) {
+    if (job.status !== "queued") {
+      await updateWebsiteJob(sessionId, jobId, (current) => ({
+        ...current,
+        status: "queued",
+        errorMessage: null,
+        statusDetail: `Resuming stale ${current.jobKind === "edit" ? "website edit" : "website generation"} job after local server restart.`
+      }));
+    }
     void queueWebsiteJobRun(sessionId, jobId);
   }
+
   return (await getWebsiteJob(sessionId, jobId)) ?? job;
 }

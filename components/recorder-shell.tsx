@@ -28,6 +28,7 @@ import {
   VideoJob,
   VideoModelPreset,
   VideoPipelineMode,
+  WebsiteGenerationProfile,
   WebsiteJob,
   WorldJob
 } from "@/lib/types";
@@ -43,6 +44,7 @@ const IMAGE_GENERATION_PROFILES: ImageGenerationProfile[] = ["pro", "fast"];
 const IMAGE_FOLLOW_MODES: ImageFollowMode[] = ["auto", "loose", "close"];
 const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
+const WEBSITE_GENERATION_PROFILES: WebsiteGenerationProfile[] = ["fast", "econ"];
 const GALLERY_CACHE_VERSION = "v1";
 
 type OutputTarget = RecorderGalleryTarget;
@@ -92,6 +94,7 @@ interface FinalizeOptionsSnapshot {
   imageFollowMode: ImageFollowMode;
   videoModelPreset: VideoModelPreset;
   videoPipelineMode: VideoPipelineMode;
+  websiteGenerationProfile: WebsiteGenerationProfile;
 }
 
 interface FlightRect {
@@ -210,7 +213,8 @@ export function RecorderShell({
     analysisReasoningEffort: "medium" as AnalysisReasoningEffort,
     imageSizePreset: "medium" as ImageSizePreset,
     imageGenerationProfile: "fast" as ImageGenerationProfile,
-    imageFollowMode: "auto" as ImageFollowMode
+    imageFollowMode: "auto" as ImageFollowMode,
+    websiteGenerationProfile: "fast" as WebsiteGenerationProfile
   });
   const canListenRef = useRef(!(authEnabled && !viewer));
   const galleryNoticeTimeoutRef = useRef<number | null>(null);
@@ -219,6 +223,7 @@ export function RecorderShell({
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
   const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("fast");
+  const [websiteGenerationProfile, setWebsiteGenerationProfile] = useState<WebsiteGenerationProfile>("fast");
   const [imageFollowMode, setImageFollowMode] = useState<ImageFollowMode>("auto");
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");
   const [videoPipelineMode, setVideoPipelineMode] = useState<VideoPipelineMode>("normal");
@@ -249,9 +254,10 @@ export function RecorderShell({
       analysisReasoningEffort,
       imageSizePreset,
       imageGenerationProfile,
-      imageFollowMode
+      imageFollowMode,
+      websiteGenerationProfile
     };
-  }, [analysisReasoningEffort, imageFollowMode, imageGenerationProfile, imageSizePreset]);
+  }, [analysisReasoningEffort, imageFollowMode, imageGenerationProfile, imageSizePreset, websiteGenerationProfile]);
 
   useEffect(() => {
     setActiveViewer(viewer);
@@ -467,7 +473,8 @@ export function RecorderShell({
       imageGenerationProfile,
       imageFollowMode,
       videoModelPreset,
-      videoPipelineMode
+      videoPipelineMode,
+      websiteGenerationProfile
     };
   }
 
@@ -989,7 +996,8 @@ export function RecorderShell({
           imageGenerationProfile: options.imageGenerationProfile,
           imageFollowMode: options.imageFollowMode,
           videoModelPreset: options.videoModelPreset,
-          videoPipelineMode: options.videoPipelineMode
+          videoPipelineMode: options.videoPipelineMode,
+          websiteGenerationProfile: options.websiteGenerationProfile
         })
       });
       const createPayload = await createResponse.json().catch(() => null);
@@ -1687,6 +1695,28 @@ export function RecorderShell({
                     </button>
                   </div>
                   <p className="recorder-settings-copy">{outputTargetSummary(outputTarget, websiteEnabled)}</p>
+                </section>
+
+                <section className="recorder-settings-section">
+                  <span className="recorder-tool-label">Website model</span>
+                  <div className="segmented-control">
+                    {WEBSITE_GENERATION_PROFILES.map((profile) => (
+                      <button
+                        key={profile}
+                        type="button"
+                        className={websiteGenerationProfile === profile ? "active" : ""}
+                        onClick={() => setWebsiteGenerationProfile(profile)}
+                        disabled={controlTransitioning || !websiteEnabled}
+                      >
+                        {profile === "fast" ? "Fast" : "Econ"}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="recorder-settings-copy">
+                    {websiteGenerationProfile === "fast"
+                      ? "Fast uses v0-max with image generation from the target preview, then exports a same-origin static preview for editing."
+                      : "Econ uses the existing Codex preview-to-code path in Vercel Sandbox."}
+                  </p>
                 </section>
 
                 <section className="recorder-settings-section">

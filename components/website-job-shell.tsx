@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent } from "react";
 import {
   SessionDetail,
+  TranscriptToken,
   WebsiteEditAnnotation,
   WebsiteEditDomCandidate,
   WebsiteEditPoint,
@@ -12,6 +13,8 @@ import {
   WebsiteEditStroke,
   WebsiteJob
 } from "@/lib/types";
+
+const MAX_EDIT_STROKE_POINTS = 160;
 
 function websiteStatusLabel(status: WebsiteJob["status"]) {
   switch (status) {
@@ -28,6 +31,10 @@ function websiteStatusLabel(status: WebsiteJob["status"]) {
     case "failed":
       return "Failed";
   }
+}
+
+function websiteFrameworkLabel(framework: WebsiteJob["framework"]) {
+  return framework === "next-react" ? "Next.js + React + TypeScript" : "Vite + React + TypeScript";
 }
 
 function formatCreatedAt(isoString: string) {
@@ -69,9 +76,89 @@ function computeStrokeBbox(strokes: WebsiteEditStroke[]): WebsiteEditRect {
   };
 }
 
+function shouldAppendStrokePoint(previous: WebsiteEditPoint, next: WebsiteEditPoint) {
+  const distance = Math.hypot(next.x - previous.x, next.y - previous.y);
+  const elapsedMs =
+    typeof previous.tMs === "number" && typeof next.tMs === "number" ? Math.abs(next.tMs - previous.tMs) : 0;
+  return distance >= 2 || elapsedMs >= 50;
+}
+
+function sampleStrokePoints(points: WebsiteEditPoint[]) {
+  if (points.length <= MAX_EDIT_STROKE_POINTS) {
+    return points;
+  }
+
+  const sampled: WebsiteEditPoint[] = [];
+  const step = (points.length - 1) / (MAX_EDIT_STROKE_POINTS - 1);
+  for (let index = 0; index < MAX_EDIT_STROKE_POINTS; index += 1) {
+    const point = points[Math.round(index * step)];
+    if (point && sampled[sampled.length - 1] !== point) {
+      sampled.push(point);
+    }
+  }
+  return sampled;
+}
+
+function prepareEditStrokesForSubmit(strokes: WebsiteEditStroke[]): WebsiteEditStroke[] {
+  return strokes.map((stroke) => {
+    const points = sampleStrokePoints(stroke.points);
+    const pointTimes = points
+      .map((point) => point.tMs)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return {
+      ...stroke,
+      points,
+      startMs:
+        typeof stroke.startMs === "number" && Number.isFinite(stroke.startMs)
+          ? stroke.startMs
+          : pointTimes.length
+            ? Math.min(...pointTimes)
+            : null,
+      endMs:
+        typeof stroke.endMs === "number" && Number.isFinite(stroke.endMs)
+          ? stroke.endMs
+          : pointTimes.length
+            ? Math.max(...pointTimes)
+            : null
+    };
+  });
+}
+
 function trimText(value: string | null | undefined, maxLength: number) {
   const trimmed = (value ?? "").replace(/\s+/g, " ").trim();
   return trimmed ? trimmed.slice(0, maxLength) : null;
+}
+
+function readRouteError(payload: unknown, fallback: string) {
+  if (payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string") {
+    return payload.error;
+  }
+
+  return fallback;
+}
+
+function getSupportedVoiceMimeType() {
+  if (typeof MediaRecorder === "undefined") {
+    return "";
+  }
+
+  return (
+    ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((mimeType) =>
+      MediaRecorder.isTypeSupported(mimeType)
+    ) ?? ""
+  );
+}
+
+function shiftTranscriptTokens(tokens: TranscriptToken[], offsetMs: number): TranscriptToken[] {
+  return tokens.map((token, index) => {
+    const startMs = Math.max(0, Math.round(token.startMs + offsetMs));
+    return {
+      ...token,
+      id: token.id || `edit-voice-token-${index + 1}`,
+      startMs,
+      endMs: Math.max(startMs + 1, Math.round(token.endMs + offsetMs))
+    };
+  });
 }
 
 export function WebsiteJobShell({
@@ -86,13 +173,23 @@ export function WebsiteJobShell({
   const [infoOpen, setInfoOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
+  const [editTranscriptTokens, setEditTranscriptTokens] = useState<TranscriptToken[] | null>(null);
   const [editStrokes, setEditStrokes] = useState<WebsiteEditStroke[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceTranscribing, setVoiceTranscribing] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   const [overlaySize, setOverlaySize] = useState({ width: 1, height: 1 });
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const overlayRef = useRef<SVGSVGElement | null>(null);
   const activeStrokeIdRef = useRef<string | null>(null);
+  const editStartedAtRef = useRef<number | null>(null);
+  const voiceRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceStreamRef = useRef<MediaStream | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voiceStartedAtRef = useRef<number | null>(null);
+  const voiceTimelineOffsetMsRef = useRef(0);
 
   const currentStrokeBbox = useMemo(() => computeStrokeBbox(editStrokes), [editStrokes]);
 
@@ -160,6 +257,169 @@ export function WebsiteJobShell({
     return () => observer.disconnect();
   }, [editOpen]);
 
+  useEffect(() => {
+    editStartedAtRef.current = editOpen ? performance.now() : null;
+  }, [editOpen]);
+
+  useEffect(() => {
+    return () => {
+      const recorder = voiceRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.onstop = null;
+        recorder.stop();
+      }
+      stopVoiceStream();
+    };
+  }, []);
+
+  function getEditTimeMs() {
+    if (editStartedAtRef.current === null) {
+      editStartedAtRef.current = performance.now();
+    }
+    return Math.max(0, Math.round(performance.now() - editStartedAtRef.current));
+  }
+
+  function stopVoiceStream() {
+    voiceStreamRef.current?.getTracks().forEach((track) => track.stop());
+    voiceStreamRef.current = null;
+  }
+
+  async function submitVoiceRecording(audioBlob: Blob, durationMs: number, timelineOffsetMs: number) {
+    if (!audioBlob.size) {
+      setVoiceStatus(null);
+      return;
+    }
+
+    setVoiceTranscribing(true);
+    setVoiceStatus("Transcribing voice request...");
+    setEditError(null);
+
+    try {
+      const formData = new FormData();
+      const extension = audioBlob.type.includes("mp4")
+        ? "m4a"
+        : audioBlob.type.includes("webm")
+          ? "webm"
+          : "wav";
+      formData.append(
+        "audio",
+        new File([audioBlob], `website-edit-voice.${extension}`, {
+          type: audioBlob.type || "audio/webm"
+        })
+      );
+      formData.append("durationMs", String(Math.max(0, Math.round(durationMs))));
+
+      const response = await fetch(`/api/sessions/${session.id}/websites/${job.id}/edits/transcribe`, {
+        method: "POST",
+        body: formData
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(readRouteError(payload, "Failed to transcribe the voice request."));
+      }
+
+      const transcriptTokens = Array.isArray(payload.transcriptTokens)
+        ? (payload.transcriptTokens as TranscriptToken[])
+        : [];
+      const text = typeof payload.text === "string" ? payload.text.trim() : "";
+      if (!transcriptTokens.length || !text) {
+        throw new Error("Voice transcription did not return usable text.");
+      }
+
+      setEditInstruction(text);
+      setEditTranscriptTokens(shiftTranscriptTokens(transcriptTokens, timelineOffsetMs));
+      setVoiceStatus(
+        payload.transcriptApproximate
+          ? "Voice transcribed with approximate timing."
+          : "Voice transcribed with timing."
+      );
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Failed to transcribe the voice request.");
+      setVoiceStatus(null);
+    } finally {
+      setVoiceTranscribing(false);
+    }
+  }
+
+  async function startVoiceRecording() {
+    if (!canEdit || voiceRecording || voiceTranscribing) {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setEditError("Voice recording is not supported in this browser.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = getSupportedVoiceMimeType();
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+
+      voiceChunksRef.current = [];
+      voiceStreamRef.current = stream;
+      voiceStartedAtRef.current = performance.now();
+      voiceTimelineOffsetMsRef.current = getEditTimeMs();
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          voiceChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onerror = () => {
+        setEditError("Voice recording failed.");
+        setVoiceStatus(null);
+      };
+      recorder.onstop = () => {
+        const chunks = voiceChunksRef.current;
+        const startedAt = voiceStartedAtRef.current;
+        const durationMs = startedAt === null ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
+        const offsetMs = voiceTimelineOffsetMsRef.current;
+        const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
+
+        voiceRecorderRef.current = null;
+        voiceStartedAtRef.current = null;
+        voiceChunksRef.current = [];
+        setVoiceRecording(false);
+        stopVoiceStream();
+        void submitVoiceRecording(blob, durationMs, offsetMs);
+      };
+
+      voiceRecorderRef.current = recorder;
+      recorder.start();
+      setVoiceRecording(true);
+      setVoiceStatus("Recording voice request...");
+      setEditError(null);
+    } catch (error) {
+      stopVoiceStream();
+      setVoiceRecording(false);
+      setVoiceStatus(null);
+      setEditError(error instanceof Error ? error.message : "Failed to start voice recording.");
+    }
+  }
+
+  function stopVoiceRecording() {
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return;
+    }
+
+    recorder.stop();
+  }
+
+  function cancelVoiceRecording() {
+    const recorder = voiceRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.onstop = null;
+      recorder.stop();
+    }
+    voiceRecorderRef.current = null;
+    voiceStartedAtRef.current = null;
+    voiceChunksRef.current = [];
+    setVoiceRecording(false);
+    stopVoiceStream();
+  }
+
   function getOverlayPoint(event: PointerEvent<SVGSVGElement>) {
     const overlay = overlayRef.current;
     if (!overlay) {
@@ -169,7 +429,8 @@ export function WebsiteJobShell({
     const rect = overlay.getBoundingClientRect();
     return {
       x: Math.max(0, Math.min(rect.width, event.clientX - rect.left)),
-      y: Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+      y: Math.max(0, Math.min(rect.height, event.clientY - rect.top)),
+      tMs: getEditTimeMs()
     };
   }
 
@@ -203,7 +464,7 @@ export function WebsiteJobShell({
 
     setEditStrokes((strokes) =>
       strokes.map((stroke) =>
-        stroke.id === strokeId
+        stroke.id === strokeId && shouldAppendStrokePoint(stroke.points[stroke.points.length - 1] ?? point, point)
           ? {
               ...stroke,
               points: [...stroke.points, point]
@@ -218,6 +479,228 @@ export function WebsiteJobShell({
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     activeStrokeIdRef.current = null;
+  }
+
+  async function blobToDataUrl(blob: Blob) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(reader.error ?? new Error("Failed to read image data."));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function inlineIframeImages(sourceDoc: Document, clonedRoot: Element) {
+    const sourceImages = Array.from(sourceDoc.images);
+    const clonedImages = Array.from(clonedRoot.querySelectorAll("img"));
+    await Promise.all(
+      clonedImages.map(async (image, index) => {
+        const sourceImage = sourceImages[index];
+        const rawSrc = sourceImage?.currentSrc || sourceImage?.src || image.getAttribute("src");
+        const src = rawSrc ? new URL(rawSrc, sourceDoc.location.href).toString() : "";
+        if (!src || src.startsWith("data:")) {
+          return;
+        }
+
+        try {
+          const response = await fetch(src, { cache: "no-store" });
+          if (!response.ok) {
+            return;
+          }
+          image.setAttribute("src", await blobToDataUrl(await response.blob()));
+          image.removeAttribute("srcset");
+        } catch {
+          // Keep the original src. The SVG render path may still handle same-origin images.
+        }
+      })
+    );
+  }
+
+  function inlineComputedStyles(sourceRoot: Element, clonedRoot: Element) {
+    const sourceElements = [sourceRoot, ...Array.from(sourceRoot.querySelectorAll("*"))];
+    const clonedElements = [clonedRoot, ...Array.from(clonedRoot.querySelectorAll("*"))];
+
+    sourceElements.forEach((sourceElement, index) => {
+      const clonedElement = clonedElements[index];
+      const view = sourceElement.ownerDocument.defaultView;
+      if (!clonedElement || !view) {
+        return;
+      }
+
+      const computed = view.getComputedStyle(sourceElement);
+      const styleText = Array.from(computed)
+        .map((property) => `${property}:${computed.getPropertyValue(property)};`)
+        .join("");
+      clonedElement.setAttribute("style", styleText);
+
+      if (sourceElement.tagName === "INPUT" && clonedElement.tagName === "INPUT") {
+        clonedElement.setAttribute("value", (sourceElement as HTMLInputElement).value);
+      }
+      if (sourceElement.tagName === "TEXTAREA" && clonedElement.tagName === "TEXTAREA") {
+        clonedElement.textContent = (sourceElement as HTMLTextAreaElement).value;
+      }
+    });
+  }
+
+  async function buildActualAnnotatedScreenshotDataUrl(annotation: WebsiteEditAnnotation) {
+    const frame = iframeRef.current;
+    const doc = frame?.contentDocument;
+    const view = doc?.defaultView;
+    if (!frame || !doc?.body || !view) {
+      return null;
+    }
+
+    const viewportWidth = Math.max(1, Math.round(overlaySize.width));
+    const viewportHeight = Math.max(1, Math.round(overlaySize.height));
+    const scale = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const scrollX = doc.defaultView?.scrollX ?? 0;
+    const scrollY = doc.defaultView?.scrollY ?? 0;
+    const documentWidth = Math.max(
+      viewportWidth,
+      doc.documentElement.scrollWidth,
+      doc.body.scrollWidth,
+      doc.documentElement.clientWidth
+    );
+    const documentHeight = Math.max(
+      viewportHeight,
+      doc.documentElement.scrollHeight,
+      doc.body.scrollHeight,
+      doc.documentElement.clientHeight
+    );
+
+    const clonedBody = doc.body.cloneNode(true) as HTMLElement;
+    inlineComputedStyles(doc.body, clonedBody);
+    clonedBody.querySelectorAll("script, style, link").forEach((element) => element.remove());
+    await inlineIframeImages(doc, clonedBody);
+
+    const bodyBackground = view.getComputedStyle(doc.body).backgroundColor || "#ffffff";
+    const serializedBody = new XMLSerializer().serializeToString(clonedBody);
+    const svg = [
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${viewportWidth}" height="${viewportHeight}" viewBox="0 0 ${viewportWidth} ${viewportHeight}">`,
+      `<foreignObject x="0" y="0" width="${viewportWidth}" height="${viewportHeight}">`,
+      `<div xmlns="http://www.w3.org/1999/xhtml" style="width:${viewportWidth}px;height:${viewportHeight}px;overflow:hidden;background:${bodyBackground};">`,
+      `<div style="width:${documentWidth}px;height:${documentHeight}px;transform:translate(${-scrollX}px, ${-scrollY}px);transform-origin:top left;">`,
+      serializedBody,
+      "</div></div></foreignObject></svg>"
+    ].join("");
+
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const nextImage = new Image();
+      const svgBlob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+      const objectUrl = URL.createObjectURL(svgBlob);
+      nextImage.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        resolve(nextImage);
+      };
+      nextImage.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("Failed to render current website screenshot."));
+      };
+      nextImage.src = objectUrl;
+    });
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(viewportWidth * scale);
+    canvas.height = Math.round(viewportHeight * scale);
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+
+    context.scale(scale, scale);
+    context.drawImage(image, 0, 0, viewportWidth, viewportHeight);
+    drawAnnotationOnCanvas(context, annotation, 1, 1);
+    return canvas.toDataURL("image/png");
+  }
+
+  function drawAnnotationOnCanvas(
+    context: CanvasRenderingContext2D,
+    annotation: WebsiteEditAnnotation,
+    scaleX: number,
+    scaleY: number
+  ) {
+    const strokeScale = (scaleX + scaleY) / 2;
+    context.save();
+    context.strokeStyle = "#ff4f38";
+    context.fillStyle = "rgba(255, 79, 56, 0.12)";
+    context.lineWidth = Math.max(5, 8 * strokeScale);
+    context.lineCap = "round";
+    context.lineJoin = "round";
+    annotation.strokes.forEach((stroke) => {
+      if (!stroke.points.length) {
+        return;
+      }
+      context.beginPath();
+      stroke.points.forEach((point, index) => {
+        const x = point.x * scaleX;
+        const y = point.y * scaleY;
+        if (index === 0) {
+          context.moveTo(x, y);
+        } else {
+          context.lineTo(x, y);
+        }
+      });
+      context.closePath();
+      context.fill();
+      context.stroke();
+    });
+    context.restore();
+  }
+
+  async function buildFallbackAnnotatedScreenshotDataUrl(annotation: WebsiteEditAnnotation) {
+    if (!job.previewImageUrl) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(job.previewImageUrl, { cache: "no-store" });
+      if (!response.ok) {
+        return null;
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      try {
+        const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+          const nextImage = new Image();
+          nextImage.onload = () => resolve(nextImage);
+          nextImage.onerror = () => reject(new Error("Failed to load website preview image."));
+          nextImage.src = objectUrl;
+        });
+
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        if (!canvas.width || !canvas.height) {
+          return null;
+        }
+
+        const context = canvas.getContext("2d");
+        if (!context) {
+          return null;
+        }
+
+        context.drawImage(image, 0, 0, canvas.width, canvas.height);
+        const scaleX = canvas.width / Math.max(1, annotation.viewportWidth);
+        const scaleY = canvas.height / Math.max(1, annotation.viewportHeight);
+        drawAnnotationOnCanvas(context, annotation, scaleX, scaleY);
+        return canvas.toDataURL("image/png");
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  async function buildAnnotatedScreenshotDataUrl(annotation: WebsiteEditAnnotation) {
+    let actualScreenshot: string | null = null;
+    try {
+      actualScreenshot = await buildActualAnnotatedScreenshotDataUrl(annotation);
+    } catch {
+      actualScreenshot = null;
+    }
+
+    return actualScreenshot ?? buildFallbackAnnotatedScreenshotDataUrl(annotation);
   }
 
   function getElementSelector(element: Element) {
@@ -264,6 +747,27 @@ export function WebsiteJobShell({
       height: currentStrokeBbox.height + 96
     };
 
+    function collectImageMetadata(element: Element) {
+      const images = [
+        ...(element.tagName.toLowerCase() === "img" ? [element] : []),
+        ...Array.from(element.querySelectorAll("img"))
+      ]
+        .map((image) => {
+          const img = image as HTMLImageElement;
+          return {
+            src: img.currentSrc || img.src || img.getAttribute("src") || "",
+            alt: img.alt || img.getAttribute("aria-label") || ""
+          };
+        })
+        .filter((image) => image.src)
+        .slice(0, 4);
+
+      return {
+        imageSrcs: Array.from(new Set(images.map((image) => image.src))).slice(0, 4),
+        imageAlts: Array.from(new Set(images.map((image) => trimText(image.alt, 120)).filter(Boolean) as string[])).slice(0, 4)
+      };
+    }
+
     return allElements
       .map((element, index) => {
         const rect = element.getBoundingClientRect();
@@ -295,6 +799,8 @@ export function WebsiteJobShell({
           return null;
         }
 
+        const imageMetadata = collectImageMetadata(element);
+
         return {
           id: `dom-${index + 1}`,
           selector: getElementSelector(element),
@@ -306,6 +812,8 @@ export function WebsiteJobShell({
             typeof element.className === "string"
               ? trimText(element.className, 240)
               : trimText(element.getAttribute("class"), 240),
+          ...(imageMetadata.imageSrcs.length ? { imageSrcs: imageMetadata.imageSrcs } : {}),
+          ...(imageMetadata.imageAlts.length ? { imageAlts: imageMetadata.imageAlts } : {}),
           rect: candidateRect
         };
       })
@@ -314,7 +822,7 @@ export function WebsiteJobShell({
   }
 
   async function submitWebsiteEdit() {
-    if (!canEdit) {
+    if (!canEdit || voiceRecording || voiceTranscribing) {
       return;
     }
 
@@ -329,6 +837,7 @@ export function WebsiteJobShell({
       return;
     }
 
+    const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
     const frame = iframeRef.current;
     const doc = frame?.contentDocument;
     const annotation: WebsiteEditAnnotation = {
@@ -339,12 +848,13 @@ export function WebsiteJobShell({
       scrollX: doc?.defaultView?.scrollX ?? 0,
       scrollY: doc?.defaultView?.scrollY ?? 0,
       bbox: currentStrokeBbox,
-      strokes: editStrokes
+      strokes: submittedStrokes
     };
 
     setEditSubmitting(true);
     setEditError(null);
     try {
+      const annotatedScreenshotDataUrl = await buildAnnotatedScreenshotDataUrl(annotation);
       const response = await fetch(`/api/sessions/${session.id}/websites/${job.id}/edits`, {
         method: "POST",
         headers: {
@@ -353,7 +863,9 @@ export function WebsiteJobShell({
         body: JSON.stringify({
           instructionText: trimmedInstruction,
           annotation,
-          domCandidates: collectDomCandidates()
+          domCandidates: collectDomCandidates(),
+          transcriptTokens: editTranscriptTokens,
+          annotatedScreenshotDataUrl
         })
       });
       const payload = await response.json().catch(() => ({}));
@@ -439,8 +951,12 @@ export function WebsiteJobShell({
               type="button"
               className={`image-hud-button ${editOpen ? "website-edit-active" : ""}`}
               onClick={() => {
+                if (editOpen) {
+                  cancelVoiceRecording();
+                }
                 setEditOpen((value) => !value);
                 setEditError(null);
+                setVoiceStatus(null);
               }}
             >
               Edit
@@ -487,27 +1003,55 @@ export function WebsiteJobShell({
           >
             <textarea
               value={editInstruction}
-              onChange={(event) => setEditInstruction(event.target.value)}
+              onChange={(event) => {
+                setEditInstruction(event.target.value);
+                setEditTranscriptTokens(null);
+                setVoiceStatus(null);
+              }}
               placeholder="Make this a little bigger"
               rows={3}
-              disabled={editSubmitting}
+              disabled={editSubmitting || voiceRecording || voiceTranscribing}
             />
             <div className="website-edit-actions">
+              <button
+                type="button"
+                className={`image-hud-button website-voice-button ${voiceRecording ? "recording" : ""}`}
+                onClick={() => {
+                  if (voiceRecording) {
+                    stopVoiceRecording();
+                  } else {
+                    void startVoiceRecording();
+                  }
+                }}
+                disabled={editSubmitting || voiceTranscribing}
+              >
+                {voiceRecording ? "Stop voice" : voiceTranscribing ? "Transcribing" : "Voice"}
+              </button>
               <button
                 type="button"
                 className="image-hud-button"
                 onClick={() => {
                   setEditStrokes([]);
+                  setEditInstruction("");
+                  setEditTranscriptTokens(null);
                   setEditError(null);
+                  setVoiceStatus(null);
                 }}
-                disabled={editSubmitting || !editStrokes.length}
+                disabled={
+                  editSubmitting || voiceRecording || (!editStrokes.length && !editInstruction && !editTranscriptTokens)
+                }
               >
                 Clear
               </button>
-              <button type="submit" className="image-hud-button image-hud-button-strong" disabled={editSubmitting}>
+              <button
+                type="submit"
+                className="image-hud-button image-hud-button-strong"
+                disabled={editSubmitting || voiceRecording || voiceTranscribing}
+              >
                 {editSubmitting ? "Starting" : "Apply"}
               </button>
             </div>
+            {voiceStatus ? <p className="website-edit-voice-status">{voiceStatus}</p> : null}
             {editError ? <p className="website-edit-error">{editError}</p> : null}
           </form>
         ) : null}
@@ -535,7 +1079,11 @@ export function WebsiteJobShell({
           <div className="image-info-body">
             <section className="image-info-section">
               <p className="image-info-label">Framework</p>
-              <p className="image-info-copy">Vite + React + TypeScript</p>
+              <p className="image-info-copy">{websiteFrameworkLabel(job.framework)}</p>
+              <p className="image-info-label">Website model</p>
+              <p className="image-info-copy">
+                {job.generationProfile === "fast" ? "Fast (v0)" : "Econ (Codex)"}
+              </p>
               <p className="image-info-label">Sandbox</p>
               <p className="image-info-copy">{job.sandboxProvider === "vercel" ? "Vercel Sandbox" : job.sandboxProvider}</p>
               <p className="image-info-label">Created</p>

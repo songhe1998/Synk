@@ -3,5 +3,13 @@
 node_modules
 data
 .tools
+.cache
+tmp
+test-results
+tsconfig.tsbuildinfo
+error.log
+potential_work.txt
+public/website-experiments
+public/website-benchmark-gallery
 .env.local
 .DS_Store
