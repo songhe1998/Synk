@@ -169,6 +169,10 @@ function getPreviewStoragePath(ownerId: string, sessionId: string, jobId: string
   return path.posix.join(ownerId, sessionId, "websites", jobId, "preview", toStorageSafePreviewAssetPath(assetPath));
 }
 
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function toStorageSafePreviewAssetPath(assetPath: string) {
   return assetPath
     .split("/")
@@ -249,6 +253,10 @@ async function retrySupabaseWebsiteOperation<T>(
 }
 
 async function getJobRow(sessionId: string, jobId: string) {
+  if (!isUuid(sessionId) || !isUuid(jobId)) {
+    return null;
+  }
+
   const admin = getSupabaseAdminClient();
   const { data, error } = await retrySupabaseWebsiteOperation("Read website job row", () =>
     admin
