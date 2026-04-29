@@ -119,9 +119,21 @@ function dataUrlForBuffer(buffer: Buffer, mimeType: string) {
   return `data:${mimeType};base64,${buffer.toString("base64")}`;
 }
 
-function fileToV0Attachment(buffer: Buffer, name: string, contentType: string, type: "screenshot" | "zip" = "screenshot") {
+function fileToV0Attachment({
+  buffer,
+  url,
+  name,
+  contentType,
+  type = "screenshot"
+}: {
+  buffer: Buffer;
+  url?: string | null;
+  name: string;
+  contentType: string;
+  type?: "screenshot" | "zip";
+}) {
   return {
-    url: dataUrlForBuffer(buffer, contentType),
+    url: url || dataUrlForBuffer(buffer, contentType),
     name,
     contentType,
     type,
@@ -240,6 +252,7 @@ export function buildV0WebsiteEditPrompt(params: {
 export async function createV0WebsiteChat(params: {
   message: string;
   targetPreviewImage: Buffer;
+  targetPreviewImageUrl?: string | null;
   metadata: Record<string, string>;
 }) {
   const payload = await requestV0(
@@ -253,7 +266,15 @@ export async function createV0WebsiteChat(params: {
         chatPrivacy: "private",
         responseMode: "sync",
         message: params.message,
-        attachments: [fileToV0Attachment(params.targetPreviewImage, "target-preview.png", "image/png", "screenshot")],
+        attachments: [
+          fileToV0Attachment({
+            buffer: params.targetPreviewImage,
+            url: params.targetPreviewImageUrl,
+            name: "target-preview.png",
+            contentType: "image/png",
+            type: "screenshot"
+          })
+        ],
         modelConfiguration: getV0WebsiteModelConfiguration(),
         metadata: params.metadata
       })
@@ -271,6 +292,7 @@ export async function sendV0WebsiteEditMessage(params: {
     buffer: Buffer;
     fileName: string;
     mimeType: string;
+    url?: string | null;
   } | null;
   metadata: Record<string, string>;
 }) {
@@ -286,12 +308,13 @@ export async function sendV0WebsiteEditMessage(params: {
         message: params.message,
         attachments: params.annotatedScreenshot
           ? [
-              fileToV0Attachment(
-                params.annotatedScreenshot.buffer,
-                params.annotatedScreenshot.fileName,
-                params.annotatedScreenshot.mimeType,
-                "screenshot"
-              )
+              fileToV0Attachment({
+                buffer: params.annotatedScreenshot.buffer,
+                url: params.annotatedScreenshot.url,
+                name: params.annotatedScreenshot.fileName,
+                contentType: params.annotatedScreenshot.mimeType,
+                type: "screenshot"
+              })
             ]
           : [],
         modelConfiguration: getV0WebsiteModelConfiguration(),

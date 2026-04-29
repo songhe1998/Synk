@@ -57,6 +57,7 @@ import {
   sendV0WebsiteEditMessage,
   writeV0WebsiteStateMetadata
 } from "@/lib/v0-website";
+import { createV0WebsiteArtifactAttachmentUrl } from "@/lib/v0-attachment-url";
 
 const websiteJobRuns = new Map<string, Promise<WebsiteJob>>();
 
@@ -1296,9 +1297,14 @@ function isRetryableWebsiteGenerationError(message: string) {
     lower.includes("gateway timeout") ||
     lower.includes("timed out") ||
     lower.includes("timeout") ||
+    lower.includes("429") ||
+    lower.includes("500") ||
     lower.includes("502") ||
     lower.includes("503") ||
     lower.includes("504") ||
+    lower.includes("internal_server_error") ||
+    lower.includes("internal_error") ||
+    lower.includes("unexpected error") ||
     lower.includes("fetch failed") ||
     lower.includes("network") ||
     lower.includes("socket hang up") ||
@@ -1672,6 +1678,11 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
         fileName: `website-preview-${jobId}.png`,
         mimeType: "image/png"
       });
+      const targetPreviewImageUrl = createV0WebsiteArtifactAttachmentUrl({
+        sessionId,
+        jobId,
+        artifactKind: "previewImage"
+      });
 
       const prompt = buildV0WebsiteGenerationPrompt(existingJob.transcriptText);
       await updateWebsiteJob(sessionId, jobId, (current) => ({
@@ -1688,6 +1699,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
       const v0State = await createV0WebsiteChat({
         message: prompt,
         targetPreviewImage: generatedPreview.buffer,
+        targetPreviewImageUrl,
         metadata: {
           source: "synk-product-website-fast",
           sessionId,
@@ -2159,6 +2171,13 @@ async function runWebsiteFastEditJob(sessionId: string, jobId: string) {
   }
 
   const visualReferenceImage = await getWebsiteJobArtifact(sessionId, editJob.id, "previewImage");
+  const visualReferenceImageUrl = visualReferenceImage
+    ? createV0WebsiteArtifactAttachmentUrl({
+        sessionId,
+        jobId: editJob.id,
+        artifactKind: "previewImage"
+      })
+    : null;
   const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -2183,7 +2202,12 @@ async function runWebsiteFastEditJob(sessionId: string, jobId: string) {
       const nextV0State = await sendV0WebsiteEditMessage({
         chatId: parentV0State.chatId,
         message: prompt,
-        annotatedScreenshot: visualReferenceImage,
+        annotatedScreenshot: visualReferenceImage
+          ? {
+              ...visualReferenceImage,
+              url: visualReferenceImageUrl
+            }
+          : null,
         metadata: {
           source: "synk-product-website-fast",
           sessionId,
