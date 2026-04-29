@@ -28,6 +28,7 @@ const FAST_IMAGE_TOOL_MODEL = process.env.OPENAI_FAST_IMAGE_TOOL_MODEL ?? "gpt-i
 const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const RESPONSES_TIMEOUT_MS = Number(process.env.OPENAI_RESPONSES_TIMEOUT_MS ?? 120000);
 const SKETCH_BACKGROUND = "#fff8e6";
+const RESPONSES_MAX_ATTEMPTS = 3;
 
 interface ExtractedSceneObject {
   tag: string;
@@ -301,29 +302,73 @@ function buildImageSourceInstruction(
   return `${renderGuardrail} ${identityIntro} ${followInstruction} Do not include any labels, text, dots, guide lines, or callout lines in the final image.`.trim();
 }
 
-async function callResponsesApi(payload: object, apiKey: string) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error(`Responses API timed out after ${RESPONSES_TIMEOUT_MS}ms`)), RESPONSES_TIMEOUT_MS);
-  try {
-    const response = await fetch(RESPONSES_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
+function isRetryableResponsesError(message: string) {
+  return (
+    message.includes("timed out") ||
+    message.includes("abort") ||
+    message.includes("econnreset") ||
+    message.includes("fetch failed") ||
+    message.includes("connection termination") ||
+    message.includes("upstream connect error") ||
+    message.includes("reset") ||
+    message.includes("network")
+  );
+}
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+async function waitBeforeRetry(attempt: number) {
+  await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+}
+
+async function callResponsesApi(payload: object, apiKey: string) {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= RESPONSES_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(new Error(`Responses API timed out after ${RESPONSES_TIMEOUT_MS}ms`)),
+      RESPONSES_TIMEOUT_MS
+    );
+
+    try {
+      const response = await fetch(RESPONSES_URL, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        const error = new Error(`OpenAI Responses API failed: ${response.status} ${errorText}`);
+        const retryable =
+          response.status === 429 ||
+          response.status >= 500 ||
+          isRetryableResponsesError(error.message.toLowerCase());
+        if (!retryable || attempt === RESPONSES_MAX_ATTEMPTS) {
+          throw error;
+        }
+        lastError = error;
+      } else {
+        return response.json();
+      }
+    } catch (error) {
+      clearTimeout(timeout);
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const retryable = isRetryableResponsesError(message);
+      if (!retryable || attempt === RESPONSES_MAX_ATTEMPTS) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
     }
 
-    return response.json();
-  } finally {
-    clearTimeout(timeout);
+    await waitBeforeRetry(attempt);
   }
+
+  throw lastError ?? new Error("OpenAI Responses API failed without a response.");
 }
 
 function extractOutputText(payload: any) {

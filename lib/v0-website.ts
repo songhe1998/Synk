@@ -3,6 +3,7 @@ import { getV0ApiKey, getV0ApiKeySetupError, hasV0ApiKeyConfig } from "@/lib/v0-
 import { compactWebsiteEditTargetResolutionForPrompt } from "@/lib/website-edit-targeting";
 
 const V0_API_BASE = "https://api.v0.dev/v1";
+const V0_MAX_ATTEMPTS = 3;
 
 export interface V0WebsiteSourceFile {
   relativePath: string;
@@ -63,27 +64,55 @@ export function getV0WebsiteModelConfiguration() {
 async function requestV0(endpoint: string, init: RequestInit, label: string) {
   requireV0WebsiteConfig();
   const startedAt = Date.now();
-  const response = await fetch(`${V0_API_BASE}${endpoint}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${getV0ApiKey()}`,
-      ...(init.headers ?? {})
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= V0_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(`${V0_API_BASE}${endpoint}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${getV0ApiKey()}`,
+          ...(init.headers ?? {})
+        }
+      });
+      const text = await response.text();
+      let payload: V0RequestPayload;
+      try {
+        payload = text ? (JSON.parse(text) as V0RequestPayload) : {};
+      } catch {
+        payload = { raw: text } as V0RequestPayload;
+      }
+
+      if (!response.ok) {
+        const error = new Error(`${label} failed: HTTP ${response.status} ${JSON.stringify(payload).slice(0, 1200)}`);
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt === V0_MAX_ATTEMPTS) {
+          throw error;
+        }
+        lastError = error;
+      } else {
+        payload.__timingMs = Date.now() - startedAt;
+        return payload;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      const retryable =
+        message.includes("fetch failed") ||
+        message.includes("connection termination") ||
+        message.includes("upstream connect error") ||
+        message.includes("econnreset") ||
+        message.includes("reset") ||
+        message.includes("network");
+      if (!retryable || attempt === V0_MAX_ATTEMPTS) {
+        throw error;
+      }
+      lastError = error instanceof Error ? error : new Error(String(error));
     }
-  });
-  const text = await response.text();
-  let payload: V0RequestPayload;
-  try {
-    payload = text ? (JSON.parse(text) as V0RequestPayload) : {};
-  } catch {
-    payload = { raw: text } as V0RequestPayload;
+
+    await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
   }
 
-  if (!response.ok) {
-    throw new Error(`${label} failed: HTTP ${response.status} ${JSON.stringify(payload).slice(0, 1200)}`);
-  }
-
-  payload.__timingMs = Date.now() - startedAt;
-  return payload;
+  throw lastError ?? new Error(`${label} failed without a response.`);
 }
 
 function dataUrlForBuffer(buffer: Buffer, mimeType: string) {
