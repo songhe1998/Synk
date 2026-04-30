@@ -5,21 +5,27 @@ import {
   saveSessionAsset,
   updateSessionPreferences
 } from "@/lib/session-store";
+import sharp from "sharp";
 import {
   extractSceneFromTranscript,
+  generateEditedImageFromImage,
   generateImageFromSketch,
   groundSceneExtraction,
   renderAnnotatedSketchPng,
-  renderSketchPng
+  renderSketchPng,
+  writeImageEditPrompt
 } from "@/lib/scene-analysis";
 import { buildDisplayTranscript } from "@/lib/transcript-format";
 import {
   AnalysisReasoningEffort,
+  AssetKind,
+  ImageEditAnnotation,
   ImageFollowMode,
   ImageGenerationProfile,
   ImageGenerationSource,
   ImageSizePreset,
-  SessionDetail
+  SessionDetail,
+  TranscriptToken
 } from "@/lib/types";
 
 function getOpenAiKey() {
@@ -196,6 +202,81 @@ export async function createImageExperience({
     imageGenerationProfile,
     imageFollowMode
   });
+}
+
+export async function editSessionGeneratedImage({
+  sessionId,
+  transcriptText,
+  transcriptTokens,
+  annotation,
+  annotatedImage,
+  sourceAssetKind
+}: {
+  sessionId: string;
+  transcriptText: string;
+  transcriptTokens?: TranscriptToken[] | null;
+  annotation: ImageEditAnnotation;
+  annotatedImage: Buffer;
+  sourceAssetKind?: Extract<
+    AssetKind,
+    "editedImage" | "generatedImageLabeled" | "generatedImagePlain" | "generatedImage"
+  >;
+}) {
+  const session = await ensureSessionAnalysis({
+    sessionId
+  });
+
+  const resolvedSourceAssetKind =
+    sourceAssetKind ??
+    (session.editedImageUrl
+      ? "editedImage"
+      : session.generatedImageLabeledUrl
+        ? "generatedImageLabeled"
+        : session.generatedImagePlainUrl
+          ? "generatedImagePlain"
+          : session.generatedImageUrl
+            ? "generatedImage"
+            : null);
+
+  if (!resolvedSourceAssetKind) {
+    throw new Error("A generated image is required before editing.");
+  }
+
+  const sourceImage = await getSessionAsset(sessionId, resolvedSourceAssetKind);
+  if (!sourceImage) {
+    throw new Error("The selected image for editing is missing.");
+  }
+
+  const promptPackage = await writeImageEditPrompt({
+    currentImage: sourceImage.buffer,
+    annotatedImage,
+    transcriptText,
+    transcriptTokens,
+    annotation,
+    analysis: session.analysis,
+    apiKey: getOpenAiKey(),
+    profile: session.imageGenerationProfile
+  });
+
+  const metadata = await sharp(sourceImage.buffer).metadata().catch(() => null);
+  const editedImage = await generateEditedImageFromImage({
+    prompt: promptPackage.edit_prompt,
+    image: sourceImage.buffer,
+    apiKey: getOpenAiKey(),
+    width: metadata?.width ?? session.canvasWidth,
+    height: metadata?.height ?? session.canvasHeight,
+    imageSizePreset: session.imageSizePreset,
+    profile: session.imageGenerationProfile
+  });
+
+  await saveSessionAsset(sessionId, "editedImage", editedImage.buffer);
+
+  return {
+    session: await getRequiredSession(sessionId),
+    editPrompt: promptPackage.edit_prompt,
+    targetDescription: promptPackage.target_description,
+    requestedChange: promptPackage.requested_change
+  };
 }
 
 export async function refreshSessionDetail(sessionId: string): Promise<SessionDetail> {

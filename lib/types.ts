@@ -13,7 +13,8 @@ export type AssetKind =
   | "generatedImage"
   | "generatedImageLabeled"
   | "generatedImagePlain"
-  | "generatedVideoSourceImage";
+  | "generatedVideoSourceImage"
+  | "editedImage";
 export type EvidenceMatchKind = "exact" | "punctuation_insensitive" | "missing";
 export type ImageGenerationSource = "labeled" | "plain";
 export type WorldJobStatus = "queued" | "running" | "succeeded" | "failed";
@@ -35,6 +36,26 @@ export type WebsiteArtifactKind = "previewImage" | "codeArchive" | "distArchive"
 export type WebsiteSourceAssetKind = "annotatedSketch";
 export type WebsiteJobKind = "initial" | "edit";
 export type WebsiteGenerationProfile = "fast" | "econ";
+export type CanvasImageSourceAssetKind =
+  | "generatedImage"
+  | "generatedImageLabeled"
+  | "generatedImagePlain"
+  | "generatedVideoSourceImage"
+  | "editedImage";
+
+export interface CanvasImageLayer {
+  id: string;
+  sourceSessionId: string;
+  sourceAssetKind: CanvasImageSourceAssetKind;
+  sourceUrl: string;
+  title: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
 
 export type DrawingEvent =
   | {
@@ -209,6 +230,7 @@ export interface SessionSummary {
 
 export interface SessionDetail extends SessionSummary {
   events: DrawingEvent[];
+  canvasImageLayers: CanvasImageLayer[];
   transcript: TranscriptToken[];
   audioUrl: string | null;
   sketchUrl: string | null;
@@ -218,6 +240,7 @@ export interface SessionDetail extends SessionSummary {
   generatedImageLabeledUrl: string | null;
   generatedImagePlainUrl: string | null;
   generatedVideoSourceImageUrl: string | null;
+  editedImageUrl?: string | null;
   analysis: SceneAnalysis | null;
   worldJobs: WorldJob[];
   videoJobs: VideoJob[];
@@ -309,6 +332,24 @@ export interface WebsitePageInput {
   sketchUrl: string | null;
 }
 
+export interface WebsiteReferenceImage {
+  id: string;
+  sourceSessionId: string;
+  sourceAssetKind: CanvasImageSourceAssetKind;
+  sourceUrl: string;
+  title: string | null;
+  fileName: string;
+  mimeType: string;
+  placement: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    naturalWidth: number;
+    naturalHeight: number;
+  };
+}
+
 export interface WebsiteEditRect {
   x: number;
   y: number;
@@ -338,6 +379,18 @@ export interface WebsiteEditAnnotation {
   scrollY: number;
   bbox: WebsiteEditRect;
   strokes: WebsiteEditStroke[];
+}
+
+export type ImageEditRect = WebsiteEditRect;
+export type ImageEditPoint = WebsiteEditPoint;
+export type ImageEditStroke = WebsiteEditStroke;
+
+export interface ImageEditAnnotation {
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+  bbox: ImageEditRect;
+  strokes: ImageEditStroke[];
 }
 
 export interface WebsiteEditDomCandidate {
@@ -460,6 +513,7 @@ export interface WebsiteJob {
   sandboxId: string | null;
   transcriptText: string;
   pages: WebsitePageInput[];
+  referenceImages?: WebsiteReferenceImage[];
   prompt: string;
   providerMetadata: Record<string, unknown> | null;
   editInstructionText: string | null;

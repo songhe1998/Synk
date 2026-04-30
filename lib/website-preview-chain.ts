@@ -89,6 +89,7 @@ export function buildWebsitePreviewPrompt(transcriptText: string) {
     "It must look like a real high-end website screenshot or design mockup, not a poster, painting, storyboard frame, or illustration.",
     "Use the attached labeled sketch as a low-fidelity wireframe for layout, hierarchy, and semantic roles.",
     "The label text and sketch annotations are guidance only and must not appear in the final rendered image.",
+    "If additional reference images are attached, preserve those specific images as the visual identity of the matching sketched image regions instead of replacing them with newly invented imagery.",
     "The result should be visually refined, UI-focused, and aligned with the user's intent and stated style.",
     "Preserve the major layout zones from the wireframe, but render them as a real website with typography, surfaces, spacing, navigation, and content modules.",
     "Keep the composition cohesive and believable as a real homepage on desktop.",
@@ -101,6 +102,7 @@ export function buildWebsitePreviewPrompt(transcriptText: string) {
 export async function generateWebsitePreviewFromSketch(params: {
   transcriptText: string;
   sketchBuffer: Buffer;
+  referenceImages?: Buffer[];
   width: number;
   height: number;
 }) {
@@ -112,6 +114,7 @@ export async function generateWebsitePreviewFromSketch(params: {
     width: params.width,
     height: params.height,
     source: "labeled",
+    referenceImages: params.referenceImages,
     imageSizePreset: "large",
     profile: "pro"
   });
@@ -260,6 +263,7 @@ export async function createWebsitePlaceholderAssets(assetPlan: WebsiteAssetPlan
 export function buildPreviewDrivenClonePrompt(params: {
   assetPlan: WebsiteAssetPlan;
   generatedAssets: Array<{ component: WebsiteImageryComponent; fileName: string }>;
+  referenceImages?: Array<{ fileName: string; title: string | null }>;
   transcriptText: string;
   assetDeliveryMode?: "input" | "project-placeholder";
   scaffoldFamily?: "editorial" | "product" | "marketing";
@@ -269,6 +273,11 @@ export function buildPreviewDrivenClonePrompt(params: {
     assetDeliveryMode === "project-placeholder"
       ? `- src/generated-assets/${fileName} -> ${component.role}. This file already exists in the project as a placeholder. Import and use this exact file path in the implementation. Do not rename it, duplicate it elsewhere, or replace it with CSS/SVG. It will be swapped with the final matched image before the build step.`
       : `- /vercel/sandbox/input/${fileName} -> ${component.role}. Use this exact generated image as the page imagery for that slot.`
+  );
+  const referenceLines = (params.referenceImages ?? []).map(({ fileName, title }, index) =>
+    assetDeliveryMode === "project-placeholder"
+      ? `- src/generated-assets/${fileName} -> exact user-provided canvas reference image ${index + 1}${title ? ` (${title})` : ""}. Use this exact file for the matching visual/image region. Do not redraw it, regenerate it, replace it, rename it, or fetch a substitute.`
+      : `- /vercel/sandbox/input/${fileName} -> exact user-provided canvas reference image ${index + 1}${title ? ` (${title})` : ""}. Use this exact image for the matching visual/image region.`
   );
 
   return [
@@ -308,16 +317,21 @@ export function buildPreviewDrivenClonePrompt(params: {
     assetDeliveryMode === "project-placeholder"
       ? "Do not generate additional image assets yourself in this coding pass. The imagery asset slots already exist in the project and must be used directly."
       : "Do not create substitute imagery in CSS or SVG when a supplied generated image already covers that slot.",
+    params.referenceImages?.length
+      ? "The user dragged image references onto the canvas. Those reference images must be treated as exact assets, not inspiration."
+      : "",
     "Shared imagery style language:",
     params.assetPlan.shared_style_language,
     params.generatedAssets.length ? "Generated imagery components to use:" : "No separate preview-matched imagery components were identified. Implement all visible regions directly in code.",
     ...assetLines,
+    ...(params.referenceImages?.length ? ["Exact canvas reference images to use:", ...referenceLines] : []),
     "Inputs:",
     "- /vercel/sandbox/input/target-preview.png",
     "- /vercel/sandbox/input/transcript.txt",
     ...(assetDeliveryMode === "input"
       ? params.generatedAssets.map(({ fileName }) => `- /vercel/sandbox/input/${fileName}`)
       : []),
+    ...(assetDeliveryMode === "input" ? (params.referenceImages ?? []).map(({ fileName }) => `- /vercel/sandbox/input/${fileName}`) : []),
     "Implement the main experience at route / and add additional routes only when the preview and content naturally imply them.",
     "Leave the project ready for `npm run build`."
   ].join("\n");

@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import path from "path";
-import { WebsiteArtifactKind, WebsiteEditTargetResolution, WebsiteJob } from "@/lib/types";
+import { WebsiteArtifactKind, WebsiteEditTargetResolution, WebsiteJob, WebsiteReferenceImage } from "@/lib/types";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSupabaseStorageBucket } from "@/lib/supabase/config";
 import { readSessionBinaryAsset } from "@/lib/supabase-asset-store";
@@ -84,6 +84,7 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
     sandboxId: row.sandbox_id,
     transcriptText: row.transcript_text,
     pages,
+    referenceImages: normalizeReferenceImages(row.provider_metadata?.websiteReferenceImages),
     prompt: row.prompt,
     providerMetadata: row.provider_metadata ?? null,
     editInstructionText: row.edit_instruction_text ?? null,
@@ -101,6 +102,10 @@ function normalizeWebsiteJob(row: WebsiteJobRow): WebsiteJob {
     distArchiveUrl: getWebsiteJobAssetUrl(row.session_id, row.id, "distArchive", row.dist_archive_file_name),
     previewUrl: getWebsiteJobPreviewUrl(row.session_id, row.id, row.dist_archive_file_name)
   };
+}
+
+function normalizeReferenceImages(value: unknown): WebsiteReferenceImage[] {
+  return Array.isArray(value) ? (value as WebsiteReferenceImage[]) : [];
 }
 
 function toWebsiteJobRow(
@@ -127,7 +132,10 @@ function toWebsiteJobRow(
     transcript_text: job.transcriptText,
     pages: job.pages,
     prompt: job.prompt,
-    provider_metadata: job.providerMetadata ?? null,
+    provider_metadata: {
+      ...(job.providerMetadata ?? {}),
+      websiteReferenceImages: job.referenceImages ?? []
+    },
     status_detail: job.statusDetail,
     error_message: job.errorMessage,
     preview_image_file_name: job.previewImageFileName,

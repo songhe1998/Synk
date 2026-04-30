@@ -33,6 +33,7 @@ function makeJob(transcriptText: string): WebsiteJob {
         sketchUrl: null
       }
     ],
+    referenceImages: [],
     prompt: "",
     providerMetadata: null,
     editInstructionText: null,

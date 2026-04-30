@@ -31,6 +31,7 @@ create table if not exists public.sessions (
 create table if not exists public.session_payloads (
   session_id uuid primary key references public.sessions (id) on delete cascade,
   events jsonb not null default '[]'::jsonb,
+  canvas_image_layers jsonb not null default '[]'::jsonb,
   transcript jsonb not null default '[]'::jsonb,
   analysis jsonb,
   video_source_plan jsonb,

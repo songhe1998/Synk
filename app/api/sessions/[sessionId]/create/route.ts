@@ -133,7 +133,8 @@ export async function POST(
         : target === "website"
           ? await startWebsiteGenerationJob({
               sessionId,
-              generationProfile: websiteGenerationProfile
+              generationProfile: websiteGenerationProfile,
+              referenceImages: body?.websiteReferenceImages
             })
           : await startVideoGenerationJob({
               sessionId,

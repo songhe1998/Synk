@@ -7,6 +7,7 @@ import {
   DrawingEvent,
   GlobalSceneInfo,
   GroundedSceneObject,
+  ImageEditAnnotation,
   ImageFollowMode,
   ImageGenerationProfile,
   ImageSizePreset,
@@ -41,6 +42,12 @@ interface SceneExtractionPayload {
   objects: ExtractedSceneObject[];
   global_info: GlobalSceneInfo;
   generation_prompt: string;
+}
+
+interface ImageEditPromptPayload {
+  target_description: string;
+  requested_change: string;
+  edit_prompt: string;
 }
 
 interface InternalStrokeMetrics {
@@ -262,6 +269,10 @@ function resolveFastImageSize() {
 
 function supportsInputFidelity(model: string) {
   return !model.startsWith("gpt-image-2");
+}
+
+function imageBufferToDataUrl(buffer: Buffer) {
+  return `data:image/png;base64,${buffer.toString("base64")}`;
 }
 
 function buildImageSourceInstruction(
@@ -852,6 +863,7 @@ export async function renderGroundedSketchPng({
 export async function generateImageFromSketch({
   prompt,
   sketchImage,
+  referenceImages = [],
   apiKey,
   width,
   height,
@@ -862,6 +874,7 @@ export async function generateImageFromSketch({
 }: {
   prompt: string;
   sketchImage: Buffer;
+  referenceImages?: Buffer[];
   apiKey: string;
   width: number;
   height: number;
@@ -882,6 +895,21 @@ export async function generateImageFromSketch({
           .toBuffer()
       : sketchImage;
   const imageDataUrl = `data:image/png;base64,${preparedSketch.toString("base64")}`;
+  const referenceImageDataUrls = await Promise.all(
+    referenceImages.slice(0, 8).map(async (referenceImage) => {
+      const preparedReference =
+        profile === "fast"
+          ? await sharp(referenceImage)
+              .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
+              .png()
+              .toBuffer()
+          : await sharp(referenceImage)
+              .resize({ width: 1536, height: 1536, fit: "inside", withoutEnlargement: true })
+              .png()
+              .toBuffer();
+      return `data:image/png;base64,${preparedReference.toString("base64")}`;
+    })
+  );
   const payload = await callResponsesApi(
     {
       model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
@@ -904,7 +932,11 @@ export async function generateImageFromSketch({
             {
               type: "input_image",
               image_url: imageDataUrl
-            }
+            },
+            ...referenceImageDataUrls.map((imageUrl) => ({
+              type: "input_image",
+              image_url: imageUrl
+            }))
           ]
         }
       ],
@@ -933,6 +965,271 @@ export async function generateImageFromSketch({
   const result = imageCall?.result;
   if (typeof result !== "string" || !result) {
     throw new Error("Image generation returned no image payload.");
+  }
+
+  return {
+    model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+    buffer: Buffer.from(result, "base64")
+  };
+}
+
+function formatImageEditAnnotation(annotation: ImageEditAnnotation) {
+  const normalizedBbox = {
+    x: annotation.viewportWidth ? annotation.bbox.x / annotation.viewportWidth : 0,
+    y: annotation.viewportHeight ? annotation.bbox.y / annotation.viewportHeight : 0,
+    width: annotation.viewportWidth ? annotation.bbox.width / annotation.viewportWidth : 0,
+    height: annotation.viewportHeight ? annotation.bbox.height / annotation.viewportHeight : 0
+  };
+
+  const strokes = annotation.strokes.map((stroke, index) => ({
+    id: stroke.id || `stroke-${index + 1}`,
+    startMs: stroke.startMs ?? stroke.points[0]?.tMs ?? null,
+    endMs: stroke.endMs ?? stroke.points.at(-1)?.tMs ?? null,
+    pointCount: stroke.points.length
+  }));
+
+  return JSON.stringify(
+    {
+      viewportWidth: annotation.viewportWidth,
+      viewportHeight: annotation.viewportHeight,
+      bbox: annotation.bbox,
+      normalizedBbox,
+      strokes
+    },
+    null,
+    2
+  );
+}
+
+function formatEditTranscriptTokens(tokens: TranscriptToken[] | null | undefined) {
+  if (!tokens?.length) {
+    return "[]";
+  }
+
+  return JSON.stringify(
+    tokens.slice(0, 120).map((token) => ({
+      text: token.text,
+      startMs: token.startMs,
+      endMs: token.endMs
+    })),
+    null,
+    2
+  );
+}
+
+function formatSceneObjectsForEdit(analysis: SceneAnalysis | null | undefined) {
+  if (!analysis?.objects.length) {
+    return "None recorded.";
+  }
+
+  return analysis.objects
+    .slice(0, 16)
+    .map((object) => {
+      const bbox = object.bbox
+        ? ` bbox=${JSON.stringify({
+            x: Math.round(object.bbox.x),
+            y: Math.round(object.bbox.y),
+            width: Math.round(object.bbox.width),
+            height: Math.round(object.bbox.height)
+          })}`
+        : "";
+      return `- ${object.label || object.tag}: ${object.description}${bbox}`;
+    })
+    .join("\n");
+}
+
+const IMAGE_EDIT_PROMPT_INSTRUCTIONS = `
+You write precise edit prompts for an image editing model.
+
+Inputs:
+- The current generated image.
+- The same image with the user's red sketch marks over it.
+- The user's spoken edit request.
+- Optional timing metadata for the spoken words and drawn strokes.
+- Optional prior scene analysis from the original sketch-to-image generation.
+
+Rules:
+- Treat the red sketch marks only as targeting guidance. They must not appear in the output.
+- Resolve vague words like this, that, here, and this part by matching the sketch mark location and timing to the spoken request.
+- Identify the target by visible content and approximate location in the image, for example "the small lantern in the upper-right corner" or "the character's left hand near the center".
+- The edit_prompt must say exactly what to change and where, and must also say to preserve the rest of the image unchanged.
+- Do not ask the model to add labels, red marks, outlines, arrows, circles, or callouts.
+- If the request is ambiguous, choose the most likely marked target and make the prompt concrete.
+- Return JSON only.
+`.trim();
+
+export async function writeImageEditPrompt({
+  currentImage,
+  annotatedImage,
+  transcriptText,
+  transcriptTokens,
+  annotation,
+  analysis,
+  apiKey,
+  profile = "pro"
+}: {
+  currentImage: Buffer;
+  annotatedImage: Buffer;
+  transcriptText: string;
+  transcriptTokens?: TranscriptToken[] | null;
+  annotation: ImageEditAnnotation;
+  analysis?: SceneAnalysis | null;
+  apiKey: string;
+  profile?: ImageGenerationProfile;
+}) {
+  const payload = await callResponsesApi(
+    {
+      model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+      ...(profile === "fast"
+        ? {
+            reasoning: {
+              effort: "low"
+            }
+          }
+        : {}),
+      store: false,
+      instructions: IMAGE_EDIT_PROMPT_INSTRUCTIONS,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [
+                "Spoken edit request:",
+                transcriptText.trim() || "(empty)",
+                "",
+                "Prior final image prompt:",
+                analysis?.generationPrompt?.trim() || "(not available)",
+                "",
+                "Prior scene objects:",
+                formatSceneObjectsForEdit(analysis),
+                "",
+                "Sketch mark geometry:",
+                formatImageEditAnnotation(annotation),
+                "",
+                "Timed spoken tokens:",
+                formatEditTranscriptTokens(transcriptTokens)
+              ].join("\n")
+            },
+            {
+              type: "input_image",
+              image_url: imageBufferToDataUrl(currentImage)
+            },
+            {
+              type: "input_image",
+              image_url: imageBufferToDataUrl(annotatedImage)
+            }
+          ]
+        }
+      ],
+      text: {
+        format: {
+          type: "json_schema",
+          name: "image_edit_prompt",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: {
+              target_description: { type: "string" },
+              requested_change: { type: "string" },
+              edit_prompt: { type: "string" }
+            },
+            required: ["target_description", "requested_change", "edit_prompt"],
+            additionalProperties: false
+          }
+        }
+      }
+    },
+    apiKey
+  );
+
+  return JSON.parse(extractOutputText(payload)) as ImageEditPromptPayload;
+}
+
+export async function generateEditedImageFromImage({
+  prompt,
+  image,
+  apiKey,
+  width,
+  height,
+  imageSizePreset,
+  profile = "pro"
+}: {
+  prompt: string;
+  image: Buffer;
+  apiKey: string;
+  width: number;
+  height: number;
+  imageSizePreset: ImageSizePreset;
+  profile?: ImageGenerationProfile;
+}) {
+  const imageToolModel = profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL;
+  const imageToolSize =
+    profile === "fast" ? resolveFastImageSize() : resolveImageToolSize(width, height, imageSizePreset);
+  const preparedImage =
+    profile === "fast"
+      ? await sharp(image)
+          .resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true })
+          .png()
+          .toBuffer()
+      : image;
+
+  const payload = await callResponsesApi(
+    {
+      model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+      ...(profile === "fast"
+        ? {
+            reasoning: {
+              effort: "low"
+            }
+          }
+        : {}),
+      store: false,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [
+                prompt.trim(),
+                "Preserve all unmentioned people, objects, layout, composition, lighting, camera angle, and style unchanged.",
+                "Do not include red sketch marks, labels, arrows, circles, outlines, guide marks, or explanatory text."
+              ].join(" ")
+            },
+            {
+              type: "input_image",
+              image_url: imageBufferToDataUrl(preparedImage)
+            }
+          ]
+        }
+      ],
+      tools: [
+        {
+          type: "image_generation",
+          model: imageToolModel,
+          action: "edit",
+          size: imageToolSize,
+          quality: profile === "fast" ? "low" : "medium",
+          ...(supportsInputFidelity(imageToolModel)
+            ? {
+                input_fidelity: profile === "fast" ? "low" : "high"
+              }
+            : {})
+        }
+      ],
+      tool_choice: {
+        type: "image_generation"
+      }
+    },
+    apiKey
+  );
+
+  const imageCall = payload?.output?.find((item: any) => item.type === "image_generation_call");
+  const result = imageCall?.result;
+  if (typeof result !== "string" || !result) {
+    throw new Error("Image edit returned no image payload.");
   }
 
   return {

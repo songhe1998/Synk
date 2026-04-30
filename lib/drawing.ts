@@ -109,17 +109,13 @@ export function buildDrawingState(events: DrawingEvent[], upToMs = Number.POSITI
   return state;
 }
 
-export function drawDrawingState(
-  context: CanvasRenderingContext2D,
-  state: DrawingState,
-  width: number,
-  height: number
-) {
-  context.save();
+export function drawDrawingBackground(context: CanvasRenderingContext2D, width: number, height: number) {
   context.clearRect(0, 0, width, height);
   context.fillStyle = "#fff8e6";
   context.fillRect(0, 0, width, height);
+}
 
+export function drawDrawingStrokes(context: CanvasRenderingContext2D, state: DrawingState) {
   for (const stroke of state.strokes) {
     if (stroke.points.length === 0) {
       continue;
@@ -154,7 +150,17 @@ export function drawDrawingState(
     context.stroke();
     context.restore();
   }
+}
 
+export function drawDrawingState(
+  context: CanvasRenderingContext2D,
+  state: DrawingState,
+  width: number,
+  height: number
+) {
+  context.save();
+  drawDrawingBackground(context, width, height);
+  drawDrawingStrokes(context, state);
   context.restore();
 }
 

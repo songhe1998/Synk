@@ -18,6 +18,8 @@ function toAssetKind(assetName: string): AssetKind | null {
       return "generatedImagePlain";
     case "generatedVideoSourceImage":
       return "generatedVideoSourceImage";
+    case "editedImage":
+      return "editedImage";
     default:
       return null;
   }

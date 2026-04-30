@@ -67,7 +67,8 @@ export async function POST(
     const body = await request.json().catch(() => ({}));
     const job = await startWebsiteGenerationJob({
       sessionId,
-      generationProfile: parseWebsiteGenerationProfile(body?.websiteGenerationProfile)
+      generationProfile: parseWebsiteGenerationProfile(body?.websiteGenerationProfile),
+      referenceImages: body?.websiteReferenceImages
     });
 
     if (job.status === "failed") {

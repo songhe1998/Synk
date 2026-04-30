@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import {
   AnalysisReasoningEffort,
   AssetKind,
+  CanvasImageLayer,
   DrawingEvent,
   ImageFollowMode,
   ImageGenerationProfile,
@@ -34,6 +35,7 @@ interface UploadPayload {
   canvasHeight: number;
   durationMs: number;
   sketchBuffer?: Buffer | null;
+  canvasImageLayers?: CanvasImageLayer[];
 }
 
 interface SessionRecordRow {
@@ -58,6 +60,7 @@ interface SessionRecordRow {
 interface SessionPayloadRow {
   session_id: string;
   events: DrawingEvent[] | null;
+  canvas_image_layers?: CanvasImageLayer[] | null;
   transcript: TranscriptToken[] | null;
   analysis: SceneAnalysis | null;
   video_source_plan: VideoSourcePlan | null;
@@ -140,6 +143,8 @@ function getAssetFileName(assetKind: AssetKind) {
       return "generated-image-plain.png";
     case "generatedVideoSourceImage":
       return "generated-video-source-image.png";
+    case "editedImage":
+      return "edited-image.png";
   }
 }
 
@@ -423,7 +428,8 @@ export async function saveSupabaseSessionUpload(sessionId: string, payload: Uplo
 
   try {
     await upsertPayloadRow(sessionId, {
-      events: payload.events
+      events: payload.events,
+      canvas_image_layers: payload.canvasImageLayers ?? []
     });
     console.info(`[session-upload] ${sessionId} drawing events saved`);
   } catch (error) {
@@ -592,6 +598,7 @@ export async function getSupabaseSessionDetail(sessionId: string, userId?: strin
   return {
     ...normalizeSummary(row),
     events: payload?.events ?? [],
+    canvasImageLayers: payload?.canvas_image_layers ?? [],
     transcript: payload?.transcript ?? [],
     audioUrl: assets.some((asset) => asset.kind === "audio") ? `/api/sessions/${sessionId}/audio` : null,
     sketchUrl: getAssetUrl("sketch"),
@@ -601,6 +608,9 @@ export async function getSupabaseSessionDetail(sessionId: string, userId?: strin
     generatedImageLabeledUrl: getAssetUrl("generatedImageLabeled") ?? generatedImageUrl,
     generatedImagePlainUrl: getAssetUrl("generatedImagePlain"),
     generatedVideoSourceImageUrl: getAssetUrl("generatedVideoSourceImage"),
+    editedImageUrl: getAssetUrl("editedImage")
+      ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(row.updated_at)}`
+      : null,
     analysis: payload?.analysis ?? null,
     worldJobs,
     videoJobs,

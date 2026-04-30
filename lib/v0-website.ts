@@ -19,6 +19,7 @@ export interface V0WebsiteState {
   timings: Record<string, number>;
   fileCount?: number;
   decodedAssetPaths?: string[];
+  localizedAssetPaths?: string[];
 }
 
 interface V0RequestPayload {
@@ -195,7 +196,8 @@ export function readV0WebsiteState(job: WebsiteJob) {
         : null,
     timings: state.timings && typeof state.timings === "object" ? (state.timings as Record<string, number>) : {},
     ...(typeof state.fileCount === "number" ? { fileCount: state.fileCount } : {}),
-    ...(Array.isArray(state.decodedAssetPaths) ? { decodedAssetPaths: state.decodedAssetPaths } : {})
+    ...(Array.isArray(state.decodedAssetPaths) ? { decodedAssetPaths: state.decodedAssetPaths } : {}),
+    ...(Array.isArray(state.localizedAssetPaths) ? { localizedAssetPaths: state.localizedAssetPaths } : {})
   } satisfies V0WebsiteState;
 }
 
@@ -209,11 +211,22 @@ export function writeV0WebsiteStateMetadata(
   };
 }
 
-export function buildV0WebsiteGenerationPrompt(transcriptText: string) {
+export function buildV0WebsiteGenerationPrompt(
+  transcriptText: string,
+  referenceImages: Array<{ fileName: string; title: string | null }> = []
+) {
   return [
     "Recreate the attached target-preview.png as a real responsive website, as close to 1:1 as practical.",
     "Use the transcript only as semantic context for labels, content, product/domain meaning, and missing details; the preview image is the source of truth for layout, visual hierarchy, and first-viewport composition.",
     "If the preview contains photography, illustrations, maps, product imagery, portraits, or other imagery regions, use image generation/assets so those regions render as real visual assets rather than empty placeholders.",
+    referenceImages.length
+      ? "The additional canvas-reference images are exact user-provided assets. When the preview or transcript refers to those visual regions, use those exact images as assets in the site instead of regenerating or substituting them."
+      : "",
+    ...referenceImages.map(
+      (image, index) =>
+        `Canvas reference ${index + 1}: ${image.fileName}${image.title ? ` (${image.title})` : ""}. Preserve its subject, colors, and identity exactly.`
+    ),
+    "On desktop and mobile, text, images, cards, and buttons must not overlap, crop important words, or depend on horizontal scrolling. Reflow dense cards into stacked layouts on narrow screens.",
     "Build the actual website experience, not an explanation of the image. Keep it polished, responsive, and free of meta text about the prompt.",
     "",
     "Transcript:",
@@ -253,6 +266,12 @@ export async function createV0WebsiteChat(params: {
   message: string;
   targetPreviewImage: Buffer;
   targetPreviewImageUrl?: string | null;
+  referenceImages?: Array<{
+    fileName: string;
+    buffer: Buffer;
+    mimeType?: string;
+    url?: string | null;
+  }>;
   metadata: Record<string, string>;
 }) {
   const payload = await requestV0(
@@ -273,7 +292,16 @@ export async function createV0WebsiteChat(params: {
             name: "target-preview.png",
             contentType: "image/png",
             type: "screenshot"
-          })
+          }),
+          ...(params.referenceImages ?? []).map((image) =>
+            fileToV0Attachment({
+              buffer: image.buffer,
+              url: image.url,
+              name: image.fileName,
+              contentType: image.mimeType ?? "image/png",
+              type: "screenshot"
+            })
+          )
         ],
         modelConfiguration: getV0WebsiteModelConfiguration(),
         metadata: params.metadata
@@ -283,6 +311,106 @@ export async function createV0WebsiteChat(params: {
   );
 
   return extractV0State(payload, "createChatMs");
+}
+
+function isTextSourcePath(relativePath: string) {
+  return /\.(tsx?|jsx?|mjs|cjs|json|md|html|css|scss|txt)$/i.test(relativePath);
+}
+
+function extensionForContentType(contentType: string | null) {
+  const normalized = contentType?.toLowerCase() ?? "";
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) {
+    return "jpg";
+  }
+  if (normalized.includes("webp")) {
+    return "webp";
+  }
+  if (normalized.includes("gif")) {
+    return "gif";
+  }
+  if (normalized.includes("svg")) {
+    return "svg";
+  }
+  return "png";
+}
+
+async function fetchV0RemoteImageAsset(url: string) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to localize v0 image asset ${url}: HTTP ${response.status}`);
+  }
+
+  const contentType = response.headers.get("content-type");
+  if (contentType && !contentType.toLowerCase().startsWith("image/")) {
+    throw new Error(`v0 remote asset ${url} is not an image (${contentType}).`);
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  const hash = await import("crypto").then(({ createHash }) => createHash("sha256").update(buffer).digest("hex").slice(0, 16));
+  return {
+    buffer,
+    fileName: `${hash}.${extensionForContentType(contentType)}`,
+    publicPath: `/v0-assets/${hash}.${extensionForContentType(contentType)}`
+  };
+}
+
+export async function localizeV0RemoteImageAssets(sourceFiles: V0WebsiteSourceFile[]) {
+  const remoteUrlPattern = /https:\/\/[A-Za-z0-9.-]+\.public\.blob\.vercel-storage\.com\/[^\s"'`)\\]+/g;
+  const urls = new Set<string>();
+
+  for (const file of sourceFiles) {
+    if (!isTextSourcePath(file.relativePath)) {
+      continue;
+    }
+    const text = file.buffer.toString("utf8");
+    for (const match of text.matchAll(remoteUrlPattern)) {
+      urls.add(match[0]);
+    }
+  }
+
+  if (!urls.size) {
+    return {
+      sourceFiles,
+      localizedAssetPaths: [] as string[]
+    };
+  }
+
+  const replacements = new Map<string, string>();
+  const assetFiles: V0WebsiteSourceFile[] = [];
+  const assetByPublicPath = new Map<string, Buffer>();
+
+  for (const url of urls) {
+    const asset = await fetchV0RemoteImageAsset(url);
+    replacements.set(url, asset.publicPath);
+    assetByPublicPath.set(asset.publicPath, asset.buffer);
+  }
+
+  for (const [publicPath, buffer] of assetByPublicPath) {
+    assetFiles.push({
+      relativePath: `public/${publicPath.replace(/^\/+/, "")}`,
+      buffer
+    });
+  }
+
+  const localizedSourceFiles = sourceFiles.map((file) => {
+    if (!isTextSourcePath(file.relativePath)) {
+      return file;
+    }
+
+    let text = file.buffer.toString("utf8");
+    for (const [url, localPath] of replacements) {
+      text = text.split(url).join(localPath);
+    }
+    return {
+      ...file,
+      buffer: Buffer.from(text, "utf8")
+    };
+  });
+
+  return {
+    sourceFiles: [...localizedSourceFiles, ...assetFiles],
+    localizedAssetPaths: assetFiles.map((file) => file.relativePath)
+  };
 }
 
 export async function sendV0WebsiteEditMessage(params: {

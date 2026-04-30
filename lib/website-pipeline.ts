@@ -17,6 +17,9 @@ import {
   WebsiteEditTargetCandidate,
   WebsiteEditTargetResolution,
   WebsiteJob,
+  WebsiteReferenceImage,
+  CanvasImageLayer,
+  CanvasImageSourceAssetKind,
   TranscriptToken
 } from "@/lib/types";
 import { requireWebsiteSandboxConfig } from "@/lib/website-config";
@@ -52,6 +55,7 @@ import {
   buildV0WebsiteGenerationPrompt,
   createV0WebsiteChat,
   getV0WebsiteVersionSourceFiles,
+  localizeV0RemoteImageAssets,
   readV0WebsiteState,
   requireV0WebsiteConfig,
   sendV0WebsiteEditMessage,
@@ -76,6 +80,103 @@ async function getRequiredSession(sessionId: string) {
 
 function buildWebsiteDisplayName(title: string) {
   return `${title} Website`.slice(0, 80);
+}
+
+const CANVAS_REFERENCE_ASSET_KINDS = new Set<CanvasImageSourceAssetKind>([
+  "generatedImage",
+  "generatedImageLabeled",
+  "generatedImagePlain",
+  "generatedVideoSourceImage",
+  "editedImage"
+]);
+
+interface LoadedWebsiteReferenceImage extends WebsiteReferenceImage {
+  buffer: Buffer;
+}
+
+function slugifyReferenceFilePart(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32);
+}
+
+function finiteReferenceNumber(value: unknown, fallback = 0) {
+  const number = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizeWebsiteReferenceImages(value: unknown, fallbackLayers: CanvasImageLayer[] = []) {
+  const rawItems = Array.isArray(value) ? value : fallbackLayers;
+
+  return rawItems
+    .map((item, index) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+
+      const candidate = item as Partial<CanvasImageLayer & WebsiteReferenceImage>;
+      const sourceAssetKind = candidate.sourceAssetKind;
+      const sourceSessionId = typeof candidate.sourceSessionId === "string" ? candidate.sourceSessionId : "";
+      const sourceUrl = typeof candidate.sourceUrl === "string" ? candidate.sourceUrl : "";
+      if (!sourceSessionId || !sourceUrl || !CANVAS_REFERENCE_ASSET_KINDS.has(sourceAssetKind as CanvasImageSourceAssetKind)) {
+        return null;
+      }
+
+      const width = Math.max(1, finiteReferenceNumber(candidate.width ?? candidate.placement?.width, 1));
+      const height = Math.max(1, finiteReferenceNumber(candidate.height ?? candidate.placement?.height, 1));
+      const filePart = slugifyReferenceFilePart(candidate.title ?? sourceAssetKind ?? "image") || "image";
+      return {
+        id: typeof candidate.id === "string" && candidate.id ? candidate.id : `canvas-reference-${index + 1}`,
+        sourceSessionId,
+        sourceAssetKind: sourceAssetKind as CanvasImageSourceAssetKind,
+        sourceUrl,
+        title: typeof candidate.title === "string" && candidate.title.trim() ? candidate.title.trim() : null,
+        fileName: `canvas-reference-${index + 1}-${filePart}.png`,
+        mimeType: "image/png",
+        placement: {
+          x: finiteReferenceNumber(candidate.x ?? candidate.placement?.x),
+          y: finiteReferenceNumber(candidate.y ?? candidate.placement?.y),
+          width,
+          height,
+          naturalWidth: Math.max(1, finiteReferenceNumber(candidate.naturalWidth ?? candidate.placement?.naturalWidth, width)),
+          naturalHeight: Math.max(1, finiteReferenceNumber(candidate.naturalHeight ?? candidate.placement?.naturalHeight, height))
+        }
+      } satisfies WebsiteReferenceImage;
+    })
+    .filter((reference): reference is WebsiteReferenceImage => Boolean(reference))
+    .slice(0, 8);
+}
+
+async function loadWebsiteReferenceImages(job: WebsiteJob): Promise<LoadedWebsiteReferenceImage[]> {
+  return Promise.all(
+    (job.referenceImages ?? []).map(async (reference) => {
+      const asset = await getSessionAsset(reference.sourceSessionId, reference.sourceAssetKind);
+      if (!asset) {
+        throw new Error(`Missing canvas reference image ${reference.fileName}.`);
+      }
+
+      return {
+        ...reference,
+        buffer: asset.buffer
+      };
+    })
+  );
+}
+
+function buildReferenceImagePromptLines(referenceImages: Array<{ fileName: string; title: string | null }>) {
+  if (!referenceImages.length) {
+    return [] as string[];
+  }
+
+  return [
+    "Exact canvas reference images:",
+    ...referenceImages.map(
+      (image, index) =>
+        `- src/generated-assets/${image.fileName} and /vercel/sandbox/input/${image.fileName}: user-dragged reference image ${index + 1}${image.title ? ` (${image.title})` : ""}. Use this exact asset for the matching image region. Do not redraw, regenerate, replace, or fetch a substitute.`
+    )
+  ];
 }
 
 interface WebsiteStyleDirection {
@@ -1603,7 +1704,10 @@ function buildCodeOnlyProductAssetPlan(transcriptText: string): WebsiteAssetPlan
   };
 }
 
-function buildDirectProductClonePrompt(transcriptText: string) {
+function buildDirectProductClonePrompt(
+  transcriptText: string,
+  referenceImages: Array<{ fileName: string; title: string | null }> = []
+) {
   const scaffoldVariant = inferWebsiteScaffoldVariant(transcriptText);
   const variantInstruction =
     scaffoldVariant === "product-dashboard"
@@ -1625,6 +1729,7 @@ function buildDirectProductClonePrompt(transcriptText: string) {
     "Translate sketch boxes into a polished product interface with clear hierarchy, spacing, panels, rails, charts, and controls.",
     "If a primitive in src/ui/primitives.tsx already fits the need, use it and refine it rather than rebuilding from raw divs.",
     "Use code and CSS for maps, charts, avatars, and utility graphics instead of expecting external generated imagery.",
+    ...buildReferenceImagePromptLines(referenceImages),
     "All visible copy must read like real end-user UI text, not implementation notes.",
     "Dead links, href=\"#\", and inert controls are not acceptable.",
     "Keep the page buildable with `npm run build`.",
@@ -1634,6 +1739,7 @@ function buildDirectProductClonePrompt(transcriptText: string) {
     "- /vercel/sandbox/input/transcript.txt",
     "- /vercel/sandbox/input/input.json",
     "- /vercel/sandbox/input/page-1-labeled-sketch.png",
+    ...referenceImages.map((image) => `- /vercel/sandbox/input/${image.fileName}`),
     "Implement the main experience at route /."
   ].join("\n");
 }
@@ -1651,6 +1757,11 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
   }
 
   const session = await getRequiredSession(sessionId);
+  const referenceImages = await loadWebsiteReferenceImages(existingJob);
+  const referenceDescriptors = referenceImages.map((image) => ({
+    fileName: image.fileName,
+    title: image.title
+  }));
   const maxAttempts = 2;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1668,6 +1779,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
       const generatedPreview = await generateWebsitePreviewFromSketch({
         transcriptText: existingJob.transcriptText,
         sketchBuffer: sketchAsset.buffer,
+        referenceImages: referenceImages.map((image) => image.buffer),
         width: session.canvasWidth,
         height: session.canvasHeight
       });
@@ -1684,7 +1796,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
         artifactKind: "previewImage"
       });
 
-      const prompt = buildV0WebsiteGenerationPrompt(existingJob.transcriptText);
+      const prompt = buildV0WebsiteGenerationPrompt(existingJob.transcriptText, referenceDescriptors);
       await updateWebsiteJob(sessionId, jobId, (current) => ({
         ...current,
         prompt,
@@ -1700,6 +1812,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
         message: prompt,
         targetPreviewImage: generatedPreview.buffer,
         targetPreviewImageUrl,
+        referenceImages,
         metadata: {
           source: "synk-product-website-fast",
           sessionId,
@@ -1713,14 +1826,16 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
       }
 
       const versionSource = await getV0WebsiteVersionSourceFiles(v0State.chatId, v0State.versionId);
+      const localizedVersionSource = await localizeV0RemoteImageAssets(versionSource.sourceFiles);
       const sourceState = {
         ...v0State,
         timings: {
           ...v0State.timings,
           ...versionSource.timings
         },
-        fileCount: versionSource.fileCount,
-        decodedAssetPaths: versionSource.decodedAssetPaths
+        fileCount: localizedVersionSource.sourceFiles.length,
+        decodedAssetPaths: versionSource.decodedAssetPaths,
+        localizedAssetPaths: localizedVersionSource.localizedAssetPaths
       };
       const sourceJob = await updateWebsiteJob(sessionId, jobId, (current) => ({
         ...current,
@@ -1735,7 +1850,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
 
       const result = await runWebsiteProvidedSourceBuildJob({
         job: sourceJob,
-        sourceFiles: versionSource.sourceFiles,
+        sourceFiles: localizedVersionSource.sourceFiles,
         onProgress: async ({ status, statusDetail, sandboxId }) => {
           await updateWebsiteJob(sessionId, jobId, (current) => ({
             ...current,
@@ -1817,13 +1932,18 @@ async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
     throw new Error("Website job not found");
   }
 
+  const referenceImages = await loadWebsiteReferenceImages(existingJob);
+  const referenceDescriptors = referenceImages.map((image) => ({
+    fileName: image.fileName,
+    title: image.title
+  }));
   const maxAttempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
       const directProductFastPath = shouldUseDirectProductFastPath(existingJob.transcriptText);
       if (directProductFastPath) {
-        const directPrompt = buildDirectProductClonePrompt(existingJob.transcriptText);
+        const directPrompt = buildDirectProductClonePrompt(existingJob.transcriptText, referenceDescriptors);
         const directDesignSpec = buildWebsiteDesignSpec({
           job: existingJob,
           mode: "direct"
@@ -1843,8 +1963,11 @@ async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
           job: directJob,
           includeSketchInputs: true,
           designSpecContent: directDesignSpec,
-          referenceImages: [],
-          projectAssetSlots: [],
+          referenceImages,
+          projectAssetSlots: referenceImages.map((image) => ({
+            fileName: image.fileName,
+            buffer: image.buffer
+          })),
           onProgress: async ({ status, statusDetail, sandboxId }) => {
             await updateWebsiteJob(sessionId, jobId, (current) => ({
               ...current,
@@ -1907,6 +2030,7 @@ async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
       const generatedPreview = await generateWebsitePreviewFromSketch({
         transcriptText: existingJob.transcriptText,
         sketchBuffer: sketchAsset.buffer,
+        referenceImages: referenceImages.map((image) => image.buffer),
         width: session.canvasWidth,
         height: session.canvasHeight
       });
@@ -1964,6 +2088,7 @@ async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
           component: asset.component,
           fileName: asset.fileName
         })),
+        referenceImages: referenceDescriptors,
         assetDeliveryMode: "project-placeholder",
         transcriptText: existingJob.transcriptText,
         scaffoldFamily: inferWebsiteScaffoldFamily(existingJob.transcriptText)
@@ -2004,12 +2129,19 @@ async function runWebsiteEconGenerationJob(sessionId: string, jobId: string) {
           {
             fileName: "target-preview.png",
             buffer: generatedPreview.buffer
-          }
+          },
+          ...referenceImages
         ],
-        projectAssetSlots: placeholderAssets.map((asset) => ({
-          fileName: asset.fileName,
-          buffer: asset.buffer
-        })),
+        projectAssetSlots: [
+          ...referenceImages.map((image) => ({
+            fileName: image.fileName,
+            buffer: image.buffer
+          })),
+          ...placeholderAssets.map((asset) => ({
+            fileName: asset.fileName,
+            buffer: asset.buffer
+          }))
+        ],
         finalProjectAssetsPromise: generatedAssetsPromise,
         onProgress: async ({ status, statusDetail, sandboxId }) => {
           await updateWebsiteJob(sessionId, jobId, (current) => ({
@@ -2704,6 +2836,7 @@ export async function startWebsiteEditJob({
     generationProfile: parentJob.generationProfile,
     transcriptText: parentJob.transcriptText,
     pages: parentJob.pages,
+    referenceImages: parentJob.referenceImages ?? [],
     prompt,
     providerMetadata: parentJob.generationProfile === "fast" ? parentJob.providerMetadata : null,
     editInstructionText: trimmedInstruction,
@@ -2733,10 +2866,12 @@ export async function startWebsiteEditJob({
 
 export async function startWebsiteGenerationJob({
   sessionId,
-  generationProfile = "fast"
+  generationProfile = "fast",
+  referenceImages
 }: {
   sessionId: string;
   generationProfile?: WebsiteJob["generationProfile"];
+  referenceImages?: unknown;
 }) {
   requireWebsiteSandboxConfig();
   if (!hasOpenAiApiKey()) {
@@ -2761,6 +2896,7 @@ export async function startWebsiteGenerationJob({
   }
 
   const transcriptText = (session.analysis?.transcriptText || buildDisplayTranscript(session.transcript)).trim();
+  const normalizedReferenceImages = normalizeWebsiteReferenceImages(referenceImages, session.canvasImageLayers);
   const pages = [
     {
       id: `${sessionId}-page-1`,
@@ -2784,6 +2920,7 @@ export async function startWebsiteGenerationJob({
     generationProfile,
     transcriptText,
     pages,
+    referenceImages: normalizedReferenceImages,
     prompt: "",
     providerMetadata: null,
     editInstructionText: null,

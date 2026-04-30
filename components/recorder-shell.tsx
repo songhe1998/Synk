@@ -3,7 +3,13 @@
 import type { Route } from "next";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { DEMO_CANVAS, applyDrawingEvent, createEmptyDrawingState, drawDrawingState } from "@/lib/drawing";
+import {
+  DEMO_CANVAS,
+  applyDrawingEvent,
+  createEmptyDrawingState,
+  drawDrawingBackground,
+  drawDrawingStrokes
+} from "@/lib/drawing";
 import {
   buildGalleryItemFromSession,
   buildPendingGalleryItem,
@@ -17,6 +23,8 @@ import {
 import { getSupabaseBrowserClient } from "@/lib/supabase/browser";
 import {
   AnalysisReasoningEffort,
+  CanvasImageLayer,
+  CanvasImageSourceAssetKind,
   DrawingEvent,
   DrawingState,
   DrawingTool,
@@ -46,6 +54,7 @@ const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 const WEBSITE_GENERATION_PROFILES: WebsiteGenerationProfile[] = ["fast", "econ"];
 const GALLERY_CACHE_VERSION = "v1";
+const GALLERY_IMAGE_DRAG_MIME = "application/x-synk-gallery-image";
 
 type OutputTarget = RecorderGalleryTarget;
 type RecorderPhase = "idle" | "arming" | "listening" | "paused" | "handoff" | "error";
@@ -55,6 +64,7 @@ interface CompletedCapture {
   title: string;
   createdAt: string;
   events: DrawingEvent[];
+  canvasImageLayers: CanvasImageLayer[];
   sketchBlob: Blob | null;
   sketchDataUrl: string | null;
   audioBlob: Blob;
@@ -110,6 +120,18 @@ interface SketchFlight {
   from: FlightRect;
   to: FlightRect | null;
   phase: "measuring" | "ready" | "animating";
+}
+
+interface LoadedCanvasImage {
+  image: HTMLImageElement;
+  promise: Promise<HTMLImageElement>;
+}
+
+interface GalleryImageDragPayload {
+  sessionId: string;
+  title: string;
+  sourceImageUrl: string;
+  sourceAssetKind: CanvasImageSourceAssetKind;
 }
 
 type BrowserWindowWithWebkitAudioContext = Window &
@@ -198,6 +220,8 @@ export function RecorderShell({
   const canvasFrameRef = useRef<HTMLDivElement | null>(null);
   const drawingStateRef = useRef<DrawingState>(createEmptyDrawingState());
   const eventsRef = useRef<DrawingEvent[]>([]);
+  const canvasImageLayersRef = useRef<CanvasImageLayer[]>([]);
+  const canvasImageCacheRef = useRef(new Map<string, LoadedCanvasImage>());
   const activeStrokeIdRef = useRef<string | null>(null);
   const takeRef = useRef<ActiveTake | null>(null);
   const voiceMonitorRef = useRef<VoiceMonitor | null>(null);
@@ -241,6 +265,7 @@ export function RecorderShell({
   const [activeDrawer, setActiveDrawer] = useState<"settings" | null>(null);
   const [flight, setFlight] = useState<SketchFlight | null>(null);
   const [hasSketchContent, setHasSketchContent] = useState(false);
+  const [isCanvasDragOver, setIsCanvasDragOver] = useState(false);
   const tool: DrawingTool = "pen";
   const color = DEFAULT_PEN_COLOR;
   const brushWidth = 6;
@@ -373,10 +398,31 @@ export function RecorderShell({
       return;
     }
 
-    drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
+    redrawCanvas();
   }, []);
 
-  function redrawCanvas() {
+  function loadCanvasImage(layer: CanvasImageLayer) {
+    const cached = canvasImageCacheRef.current.get(layer.id);
+    if (cached && cached.image.src === layer.sourceUrl) {
+      return cached.promise;
+    }
+
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    const promise = new Promise<HTMLImageElement>((resolve, reject) => {
+      image.onload = () => {
+        redrawCanvas();
+        resolve(image);
+      };
+      image.onerror = () => reject(new Error(`Failed to load canvas reference image: ${layer.title ?? layer.sourceUrl}`));
+    });
+    image.src = layer.sourceUrl;
+    const entry = { image, promise };
+    canvasImageCacheRef.current.set(layer.id, entry);
+    return promise;
+  }
+
+  function redrawCanvas(layers = canvasImageLayersRef.current) {
     const canvas = canvasRef.current;
     if (!canvas) {
       return;
@@ -387,14 +433,53 @@ export function RecorderShell({
       return;
     }
 
-    drawDrawingState(context, drawingStateRef.current, DEMO_CANVAS.width, DEMO_CANVAS.height);
+    context.save();
+    drawDrawingBackground(context, DEMO_CANVAS.width, DEMO_CANVAS.height);
+    for (const layer of layers) {
+      const cached = canvasImageCacheRef.current.get(layer.id);
+      const image = cached?.image;
+      if (!image || !image.complete || image.naturalWidth <= 0) {
+        void loadCanvasImage(layer).catch((error) => {
+          setErrorMessage(error instanceof Error ? error.message : "Failed to load a canvas reference image.");
+        });
+        continue;
+      }
+
+      context.drawImage(image, layer.x, layer.y, layer.width, layer.height);
+    }
+    drawDrawingStrokes(context, drawingStateRef.current);
+    context.restore();
+  }
+
+  function updateHasSketchContent(layers = canvasImageLayersRef.current) {
+    setHasSketchContent(drawingStateRef.current.strokes.length > 0 || layers.length > 0);
+  }
+
+  async function ensureCanvasImagesLoaded() {
+    const layers = canvasImageLayersRef.current;
+    if (!layers.length) {
+      return;
+    }
+
+    await Promise.all(layers.map((layer) => loadCanvasImage(layer)));
+    redrawCanvas(layers);
+  }
+
+  function cloneCanvasImageLayers(layers: CanvasImageLayer[]) {
+    return layers.map((layer) => ({
+      ...layer,
+      title: layer.title ?? null
+    }));
   }
 
   function resetBoard() {
     drawingStateRef.current = createEmptyDrawingState();
     eventsRef.current = [];
+    canvasImageLayersRef.current = [];
+    canvasImageCacheRef.current.clear();
     activeStrokeIdRef.current = null;
     setHasSketchContent(false);
+    setIsCanvasDragOver(false);
     redrawCanvas();
   }
 
@@ -449,6 +534,155 @@ export function RecorderShell({
     };
   }
 
+  function getCanvasDropPoint(event: React.DragEvent<HTMLElement>) {
+    const frame = canvasFrameRef.current;
+    if (!frame) {
+      return {
+        x: DEMO_CANVAS.width / 2,
+        y: DEMO_CANVAS.height / 2
+      };
+    }
+
+    const rect = frame.getBoundingClientRect();
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * DEMO_CANVAS.width,
+      y: ((event.clientY - rect.top) / rect.height) * DEMO_CANVAS.height
+    };
+  }
+
+  function readGalleryImageDragPayload(event: React.DragEvent) {
+    const raw = event.dataTransfer.getData(GALLERY_IMAGE_DRAG_MIME);
+    if (!raw) {
+      return null;
+    }
+
+    try {
+      const payload = JSON.parse(raw) as Partial<GalleryImageDragPayload>;
+      if (
+        typeof payload.sessionId !== "string" ||
+        typeof payload.title !== "string" ||
+        typeof payload.sourceImageUrl !== "string" ||
+        !payload.sourceImageUrl ||
+        !payload.sourceAssetKind
+      ) {
+        return null;
+      }
+
+      return payload as GalleryImageDragPayload;
+    } catch {
+      return null;
+    }
+  }
+
+  function getPlacedCanvasImageRect(image: HTMLImageElement, center: { x: number; y: number }) {
+    const naturalWidth = Math.max(1, image.naturalWidth || image.width || 1);
+    const naturalHeight = Math.max(1, image.naturalHeight || image.height || 1);
+    const aspectRatio = naturalWidth / naturalHeight;
+    const maxWidth = DEMO_CANVAS.width * 0.46;
+    const maxHeight = DEMO_CANVAS.height * 0.68;
+    let width = Math.min(maxWidth, naturalWidth);
+    let height = width / aspectRatio;
+
+    if (height > maxHeight) {
+      height = maxHeight;
+      width = height * aspectRatio;
+    }
+
+    const x = Math.min(Math.max(0, center.x - width / 2), DEMO_CANVAS.width - width);
+    const y = Math.min(Math.max(0, center.y - height / 2), DEMO_CANVAS.height - height);
+    return { x, y, width, height, naturalWidth, naturalHeight };
+  }
+
+  async function addCanvasImageLayerFromDrop(payload: GalleryImageDragPayload, center: { x: number; y: number }) {
+    const id = crypto.randomUUID();
+    const probeLayer: CanvasImageLayer = {
+      id,
+      sourceSessionId: payload.sessionId,
+      sourceAssetKind: payload.sourceAssetKind,
+      sourceUrl: payload.sourceImageUrl,
+      title: payload.title,
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      naturalWidth: 1,
+      naturalHeight: 1
+    };
+    const image = await loadCanvasImage(probeLayer);
+    const rect = getPlacedCanvasImageRect(image, center);
+    const layer: CanvasImageLayer = {
+      ...probeLayer,
+      ...rect
+    };
+
+    canvasImageCacheRef.current.set(layer.id, {
+      image,
+      promise: Promise.resolve(image)
+    });
+    const nextLayers = [...canvasImageLayersRef.current, layer].slice(-8);
+    canvasImageLayersRef.current = nextLayers;
+    updateHasSketchContent(nextLayers);
+    redrawCanvas(nextLayers);
+    showGalleryNotice("Image added to the canvas.");
+  }
+
+  function handleGalleryImageDragStart(event: React.DragEvent<HTMLElement>, item: RecorderGalleryItem) {
+    if (!item.sourceImageUrl || !item.sourceAssetKind) {
+      event.preventDefault();
+      return;
+    }
+
+    const payload: GalleryImageDragPayload = {
+      sessionId: item.sessionId,
+      title: item.title,
+      sourceImageUrl: item.sourceImageUrl,
+      sourceAssetKind: item.sourceAssetKind
+    };
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(GALLERY_IMAGE_DRAG_MIME, JSON.stringify(payload));
+    event.dataTransfer.setData("text/uri-list", item.sourceImageUrl);
+    event.dataTransfer.setData("text/plain", item.title);
+  }
+
+  function handleCanvasDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!event.dataTransfer.types.includes(GALLERY_IMAGE_DRAG_MIME)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsCanvasDragOver(true);
+  }
+
+  function handleCanvasDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      return;
+    }
+
+    setIsCanvasDragOver(false);
+  }
+
+  function handleCanvasDrop(event: React.DragEvent<HTMLDivElement>) {
+    const payload = readGalleryImageDragPayload(event);
+    if (!payload) {
+      return;
+    }
+
+    event.preventDefault();
+    setIsCanvasDragOver(false);
+    if (authEnabled && !activeViewer) {
+      setErrorMessage(null);
+      setAuthNotice("Sign in to start sketching, recording, and saving sessions.");
+      setAuthPromptVisible(true);
+      return;
+    }
+
+    setErrorMessage(null);
+    void addCanvasImageLayerFromDrop(payload, getCanvasDropPoint(event)).catch((error) => {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to add the image to the canvas.");
+    });
+  }
+
   function getEventTime() {
     const take = takeRef.current;
     if (!take) {
@@ -461,7 +695,7 @@ export function RecorderShell({
   function pushEvent(event: DrawingEvent) {
     eventsRef.current.push(event);
     applyDrawingEvent(drawingStateRef.current, event);
-    setHasSketchContent(drawingStateRef.current.strokes.length > 0);
+    updateHasSketchContent();
     redrawCanvas();
   }
 
@@ -942,6 +1176,7 @@ export function RecorderShell({
         );
       }
       uploadForm.append("events", JSON.stringify(capture.events));
+      uploadForm.append("canvasImageLayers", JSON.stringify(capture.canvasImageLayers));
       uploadForm.append("durationMs", String(capture.durationMs));
       uploadForm.append("canvasWidth", String(DEMO_CANVAS.width));
       uploadForm.append("canvasHeight", String(DEMO_CANVAS.height));
@@ -997,7 +1232,8 @@ export function RecorderShell({
           imageFollowMode: options.imageFollowMode,
           videoModelPreset: options.videoModelPreset,
           videoPipelineMode: options.videoPipelineMode,
-          websiteGenerationProfile: options.websiteGenerationProfile
+          websiteGenerationProfile: options.websiteGenerationProfile,
+          websiteReferenceImages: options.target === "website" ? capture.canvasImageLayers : []
         })
       });
       const createPayload = await createResponse.json().catch(() => null);
@@ -1092,12 +1328,14 @@ export function RecorderShell({
 
     try {
       const options = getFinalizeOptionsSnapshot();
+      await ensureCanvasImagesLoaded();
       const sketchBlob = await getCanvasSnapshotBlob();
       const sketchDataUrl = getCanvasSnapshotDataUrl();
       const takeSnapshot = {
         ...activeTake,
         audioPcmChunks: clonePcmChunks(activeTake.audioPcmChunks),
         events: cloneDrawingEvents(eventsRef.current),
+        canvasImageLayers: cloneCanvasImageLayers(canvasImageLayersRef.current),
         sketchBlob,
         sketchDataUrl
       };
@@ -1128,6 +1366,7 @@ export function RecorderShell({
             title: takeSnapshot.title,
             createdAt: takeSnapshot.createdAt,
             events: takeSnapshot.events,
+            canvasImageLayers: takeSnapshot.canvasImageLayers,
             sketchBlob: takeSnapshot.sketchBlob,
             sketchDataUrl: takeSnapshot.sketchDataUrl,
             audioBlob: new Blob([encodeMonoPcmWav(audioSamples, monitor.sampleRate)], { type: audioMimeType }),
@@ -1499,7 +1738,13 @@ export function RecorderShell({
         <div className="recorder-workspace">
           <section className="recorder-canvas-pane">
             <div className="recorder-board-stage">
-              <div ref={canvasFrameRef} className="canvas-frame recorder-board-frame">
+              <div
+                ref={canvasFrameRef}
+                className={`canvas-frame recorder-board-frame${isCanvasDragOver ? " recorder-board-frame-drag-over" : ""}`}
+                onDragOver={handleCanvasDragOver}
+                onDragLeave={handleCanvasDragLeave}
+                onDrop={handleCanvasDrop}
+              >
                 <canvas
                   ref={canvasRef}
                   width={DEMO_CANVAS.width}
@@ -1590,6 +1835,9 @@ export function RecorderShell({
                     key={item.sessionId}
                     ref={(node) => setGalleryCardRef(item.sessionId, node)}
                     className={getGalleryCardClass(item)}
+                    draggable={Boolean(item.sourceImageUrl && item.sourceAssetKind)}
+                    data-gallery-source-ready={item.sourceImageUrl && item.sourceAssetKind ? "true" : undefined}
+                    onDragStart={(event) => handleGalleryImageDragStart(event, item)}
                     onContextMenu={(event) => openGalleryContextMenu(event, item.sessionId)}
                   >
                     {item.href ? (

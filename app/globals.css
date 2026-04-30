@@ -1172,8 +1172,7 @@ textarea {
     linear-gradient(180deg, #0c0f14 0%, #080a0f 52%, #05070b 100%);
 }
 
-.image-experience-background,
-.image-experience-image {
+.image-experience-background {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -1187,10 +1186,59 @@ textarea {
   opacity: 0.56;
 }
 
-.image-experience-image {
-  object-fit: contain;
+.image-experience-image-shell {
+  position: absolute;
+  inset: 0;
   padding: max(26px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
     max(26px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.image-edit-target {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  max-height: 100%;
+  width: fit-content;
+  height: fit-content;
+  line-height: 0;
+  pointer-events: none;
+}
+
+.image-edit-target.editing {
+  pointer-events: auto;
+}
+
+.image-experience-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.image-edit-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.image-edit-stroke {
+  fill: none;
+  stroke: rgba(255, 79, 56, 0.96);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.26));
 }
 
 .video-experience-player {
@@ -1365,10 +1413,85 @@ textarea {
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+.image-hud-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+  transform: none;
+}
+
+.image-hud-button:disabled:hover {
+  background: rgba(12, 13, 17, 0.72);
+  border-color: rgba(255, 255, 255, 0.12);
+  transform: none;
+}
+
 .image-hud-button-strong {
   background: linear-gradient(135deg, #ff7c3b 0%, #ef5a24 100%);
   border-color: rgba(255, 190, 154, 0.3);
   color: #fff6ef;
+}
+
+.image-hud-button.recording {
+  border-color: rgba(255, 86, 61, 0.48);
+  background: rgba(255, 86, 61, 0.2);
+  color: #ffd7cf;
+}
+
+.image-edit-active {
+  border-color: rgba(255, 124, 59, 0.46);
+  background: rgba(255, 124, 59, 0.18);
+}
+
+.image-edit-panel {
+  position: absolute;
+  left: 50%;
+  bottom: max(24px, env(safe-area-inset-bottom));
+  z-index: 5;
+  width: min(720px, calc(100vw - 36px));
+  transform: translateX(-50%);
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(12, 13, 17, 0.84);
+  color: #f6f0e4;
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
+}
+
+.image-edit-panel-copy {
+  display: grid;
+  gap: 7px;
+}
+
+.image-edit-voice-status,
+.image-edit-transcript,
+.image-edit-error {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.image-edit-voice-status {
+  color: rgba(255, 247, 239, 0.74);
+  font-size: 0.88rem;
+}
+
+.image-edit-transcript {
+  color: rgba(255, 247, 239, 0.9);
+  font-size: 0.94rem;
+}
+
+.image-edit-error {
+  color: #ffd0c8;
+  font-size: 0.88rem;
+}
+
+.image-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .image-experience-empty {
@@ -1749,6 +1872,14 @@ textarea {
   width: 100%;
   height: 100%;
   aspect-ratio: auto;
+}
+
+.recorder-board-frame-drag-over {
+  outline: 3px solid rgba(255, 124, 59, 0.86);
+  outline-offset: 5px;
+  box-shadow:
+    0 30px 84px rgba(240, 90, 40, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32);
 }
 
 .recorder-board-overlay {
@@ -2560,7 +2691,7 @@ textarea {
     display: grid;
   }
 
-  .image-experience-image {
+  .image-experience-image-shell {
     padding-top: calc(max(18px, env(safe-area-inset-top)) + 56px);
     padding-bottom: calc(max(18px, env(safe-area-inset-bottom)) + 10px);
     padding-left: 16px;
@@ -2975,6 +3106,14 @@ textarea {
 
 .recorder-experience-page .recorder-gallery-card {
   border-radius: 22px;
+}
+
+.recorder-experience-page .recorder-gallery-card[data-gallery-source-ready="true"] {
+  cursor: grab;
+}
+
+.recorder-experience-page .recorder-gallery-card[data-gallery-source-ready="true"]:active {
+  cursor: grabbing;
 }
 
 .recorder-experience-page .recorder-gallery-card-thumb {

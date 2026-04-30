@@ -1,4 +1,12 @@
-import { SessionDetail, SessionSummary, VideoJob, WebsiteJob, WorldAssetSnapshot, WorldJob } from "@/lib/types";
+import {
+  CanvasImageSourceAssetKind,
+  SessionDetail,
+  SessionSummary,
+  VideoJob,
+  WebsiteJob,
+  WorldAssetSnapshot,
+  WorldJob
+} from "@/lib/types";
 
 export type RecorderGalleryTarget = "image" | "video" | "world" | "website";
 export type RecorderGalleryStatus = "pending" | "running" | "ready" | "failed";
@@ -13,6 +21,7 @@ export interface RecorderGalleryItem {
   thumbnailUrl: string | null;
   sketchThumbnailUrl: string | null;
   sourceImageUrl: string | null;
+  sourceAssetKind: CanvasImageSourceAssetKind | null;
   previewKind: RecorderGalleryPreviewKind;
   status: RecorderGalleryStatus;
   statusLabel: string;
@@ -41,11 +50,26 @@ function worldHasRenderableSplats(world: WorldAssetSnapshot | null) {
 }
 
 function getImageThumbnail(session: SessionDetail) {
-  return session.generatedImageLabeledUrl ?? session.generatedImagePlainUrl ?? session.generatedImageUrl ?? null;
+  if (session.editedImageUrl) {
+    return { url: session.editedImageUrl, assetKind: "editedImage" as const };
+  }
+  if (session.generatedImageLabeledUrl) {
+    return { url: session.generatedImageLabeledUrl, assetKind: "generatedImageLabeled" as const };
+  }
+  if (session.generatedImagePlainUrl) {
+    return { url: session.generatedImagePlainUrl, assetKind: "generatedImagePlain" as const };
+  }
+  if (session.generatedImageUrl) {
+    return { url: session.generatedImageUrl, assetKind: "generatedImage" as const };
+  }
+  return null;
 }
 
 function getVideoSourceThumbnail(session: SessionDetail) {
-  return session.generatedVideoSourceImageUrl ?? getImageThumbnail(session);
+  if (session.generatedVideoSourceImageUrl) {
+    return { url: session.generatedVideoSourceImageUrl, assetKind: "generatedVideoSourceImage" as const };
+  }
+  return getImageThumbnail(session);
 }
 
 function getWorldSourceThumbnail(session: SessionDetail) {
@@ -90,8 +114,9 @@ function resolveTarget(session: SessionDetail, preferredTarget?: RecorderGallery
 
 function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const sourceImageUrl = getImageThumbnail(session);
+  const sourceAssetKind = sourceImageUrl?.assetKind ?? null;
   const sketchThumbnailUrl = session.sketchUrl;
-  const thumbnailUrl = sourceImageUrl ?? sketchThumbnailUrl ?? null;
+  const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
   const failed = session.status === "failed";
 
   return {
@@ -102,7 +127,8 @@ function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
     href: sourceImageUrl ? `/sessions/${session.id}/image` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
-    sourceImageUrl,
+    sourceImageUrl: sourceImageUrl?.url ?? null,
+    sourceAssetKind,
     previewKind: sourceImageUrl ? "source" : sketchThumbnailUrl ? "sketch" : "placeholder",
     status: failed ? "failed" : sourceImageUrl ? "ready" : session.status === "ready" ? "running" : "pending",
     statusLabel: failed ? "Failed" : sourceImageUrl ? "Ready" : session.status === "processing" ? "Transcribing" : "Rendering",
@@ -120,8 +146,9 @@ function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
 function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const job = getLatestVideoJob(session);
   const sourceImageUrl = getVideoSourceThumbnail(session);
+  const sourceAssetKind = sourceImageUrl?.assetKind ?? null;
   const sketchThumbnailUrl = session.sketchUrl;
-  const thumbnailUrl = sourceImageUrl ?? sketchThumbnailUrl ?? null;
+  const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && job.videoUrl);
   const failed = Boolean(job && job.status === "failed");
 
@@ -133,7 +160,8 @@ function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
     href: job && (ready || failed) ? `/sessions/${session.id}/videos/${job.id}` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
-    sourceImageUrl,
+    sourceImageUrl: sourceImageUrl?.url ?? null,
+    sourceAssetKind,
     previewKind: sourceImageUrl ? "source" : sketchThumbnailUrl ? "sketch" : "placeholder",
     status: failed ? "failed" : ready ? "ready" : sourceImageUrl || job ? "running" : "pending",
     statusLabel: failed
@@ -161,8 +189,9 @@ function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
 function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const job = getLatestWorldJob(session);
   const sourceImageUrl = getWorldSourceThumbnail(session);
+  const sourceAssetKind = sourceImageUrl?.assetKind ?? null;
   const sketchThumbnailUrl = session.sketchUrl;
-  const thumbnailUrl = sourceImageUrl ?? sketchThumbnailUrl ?? null;
+  const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && worldHasRenderableSplats(job.world));
   const failed = Boolean(job && job.status === "failed");
 
@@ -174,7 +203,8 @@ function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
     href: job && (ready || failed) ? `/sessions/${session.id}/worlds/${job.id}` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
-    sourceImageUrl,
+    sourceImageUrl: sourceImageUrl?.url ?? null,
+    sourceAssetKind,
     previewKind: sourceImageUrl ? "source" : sketchThumbnailUrl ? "sketch" : "placeholder",
     status: failed ? "failed" : ready ? "ready" : sourceImageUrl || job ? "running" : "pending",
     statusLabel: failed ? "Failed" : ready ? "Ready" : job?.status === "queued" ? "Queued" : "Building",
@@ -206,6 +236,7 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl,
+    sourceAssetKind: null,
     previewKind: sourceImageUrl ? "source" : sketchThumbnailUrl ? "sketch" : "placeholder",
     status: failed ? "failed" : ready ? "ready" : job ? "running" : "pending",
     statusLabel: failed
@@ -244,6 +275,7 @@ export function buildPlaceholderGalleryItem(summary: SessionSummary): RecorderGa
     thumbnailUrl: null,
     sketchThumbnailUrl: null,
     sourceImageUrl: null,
+    sourceAssetKind: null,
     previewKind: "placeholder",
     status: failed ? "failed" : summary.status === "ready" ? "running" : "pending",
     statusLabel: failed ? "Failed" : summary.status === "processing" ? "Transcribing" : "Loading",
@@ -278,6 +310,7 @@ export function buildPendingGalleryItem({
     thumbnailUrl: sketchThumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl: null,
+    sourceAssetKind: null,
     previewKind: sketchThumbnailUrl ? "sketch" : "placeholder",
     status: "pending",
     statusLabel: "Uploading",

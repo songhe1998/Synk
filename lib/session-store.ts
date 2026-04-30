@@ -4,6 +4,7 @@ import path from "path";
 import {
   AnalysisReasoningEffort,
   AssetKind,
+  CanvasImageLayer,
   DrawingEvent,
   ImageFollowMode,
   ImageGenerationProfile,
@@ -57,6 +58,7 @@ interface UploadPayload {
   canvasHeight: number;
   durationMs: number;
   sketchBuffer?: Buffer | null;
+  canvasImageLayers?: CanvasImageLayer[];
 }
 
 function normalizeSummary(summary: SessionSummary | (Partial<SessionSummary> & { id: string; title: string; status: SessionSummary["status"]; createdAt: string; updatedAt: string; durationMs: number; audioMimeType: string | null; canvasWidth: number; canvasHeight: number; transcriptApproximate: boolean; errorMessage: string | null; })) {
@@ -99,6 +101,10 @@ function getEventsPath(sessionId: string) {
   return path.join(getSessionDir(sessionId), "events.json");
 }
 
+function getCanvasImageLayersPath(sessionId: string) {
+  return path.join(getSessionDir(sessionId), "canvas-image-layers.json");
+}
+
 function getTranscriptPath(sessionId: string) {
   return path.join(getSessionDir(sessionId), "transcript.json");
 }
@@ -127,6 +133,8 @@ function getAssetPath(sessionId: string, assetKind: AssetKind) {
       return path.join(getSessionDir(sessionId), "generated-image-plain.png");
     case "generatedVideoSourceImage":
       return path.join(getSessionDir(sessionId), "generated-video-source-image.png");
+    case "editedImage":
+      return path.join(getSessionDir(sessionId), "edited-image.png");
   }
 }
 
@@ -464,6 +472,7 @@ export async function saveSessionUpload(sessionId: string, payload: UploadPayloa
   const audioFilePath = path.join(sessionDir, `audio.${payload.audioExtension || inferAudioExtension(payload.audioMimeType)}`);
   await writeFile(audioFilePath, payload.audioBuffer);
   await writeJsonAtomic(getEventsPath(sessionId), payload.events);
+  await writeJsonAtomic(getCanvasImageLayersPath(sessionId), payload.canvasImageLayers ?? []);
   if (payload.sketchBuffer) {
     await writeFile(getAssetPath(sessionId, "sketch"), payload.sketchBuffer);
   }
@@ -625,6 +634,7 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
   }
 
   const events = await readJsonFile<DrawingEvent[]>(getEventsPath(sessionId), []);
+  const canvasImageLayers = await readJsonFile<CanvasImageLayer[]>(getCanvasImageLayersPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
   const worldJobs = await listLocalWorldJobs(sessionId);
@@ -640,6 +650,7 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
   const generatedImageLabeledExists = files.includes("generated-image-labeled.png");
   const generatedImagePlainExists = files.includes("generated-image-plain.png");
   const generatedVideoSourceImageExists = files.includes("generated-video-source-image.png");
+  const editedImageExists = files.includes("edited-image.png");
   const generatedImageExists = files.includes("generated-image.png");
   const generatedImageUrl = generatedImageLabeledExists
     ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
@@ -650,6 +661,7 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
   return {
     ...summary,
     events,
+    canvasImageLayers,
     transcript,
     audioUrl: audioFile ? `/api/sessions/${sessionId}/audio` : null,
     sketchUrl: sketchExists ? `/api/sessions/${sessionId}/assets/sketch` : null,
@@ -668,6 +680,9 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
       : null,
     generatedVideoSourceImageUrl: generatedVideoSourceImageExists
       ? `/api/sessions/${sessionId}/assets/generatedVideoSourceImage`
+      : null,
+    editedImageUrl: editedImageExists
+      ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(summary.updatedAt)}`
       : null,
     analysis,
     worldJobs,
@@ -694,6 +709,7 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
   }
 
   const events = await readJsonFile<DrawingEvent[]>(getEventsPath(sessionId), []);
+  const canvasImageLayers = await readJsonFile<CanvasImageLayer[]>(getCanvasImageLayersPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
   const worldJobs = await listLocalWorldJobs(sessionId);
@@ -709,6 +725,7 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
   const generatedImageLabeledExists = files.includes("generated-image-labeled.png");
   const generatedImagePlainExists = files.includes("generated-image-plain.png");
   const generatedVideoSourceImageExists = files.includes("generated-video-source-image.png");
+  const editedImageExists = files.includes("edited-image.png");
   const generatedImageExists = files.includes("generated-image.png");
   const generatedImageUrl = generatedImageLabeledExists
     ? `/api/sessions/${sessionId}/assets/generatedImageLabeled`
@@ -719,6 +736,7 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
   return {
     ...summary,
     events,
+    canvasImageLayers,
     transcript,
     audioUrl: audioFile ? `/api/sessions/${sessionId}/audio` : null,
     sketchUrl: sketchExists ? `/api/sessions/${sessionId}/assets/sketch` : null,
@@ -737,6 +755,9 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
       : null,
     generatedVideoSourceImageUrl: generatedVideoSourceImageExists
       ? `/api/sessions/${sessionId}/assets/generatedVideoSourceImage`
+      : null,
+    editedImageUrl: editedImageExists
+      ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(summary.updatedAt)}`
       : null,
     analysis,
     worldJobs,
