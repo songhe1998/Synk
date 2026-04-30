@@ -19,7 +19,7 @@ import { listWorldJobs } from "@/lib/world-store";
 import { getSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getSupabaseStorageBucket } from "@/lib/supabase/config";
 import { readSessionBinaryAsset, uploadSessionBinaryAsset } from "@/lib/supabase-asset-store";
-import { normalizeSupabaseError } from "@/lib/supabase/errors";
+import { isSupabaseSchemaOutdatedError, normalizeSupabaseError } from "@/lib/supabase/errors";
 
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
@@ -59,11 +59,16 @@ interface SessionRecordRow {
 
 interface SessionPayloadRow {
   session_id: string;
-  events: DrawingEvent[] | null;
+  events: DrawingEvent[] | LegacySessionEventsPayload | null;
   canvas_image_layers?: CanvasImageLayer[] | null;
   transcript: TranscriptToken[] | null;
   analysis: SceneAnalysis | null;
   video_source_plan: VideoSourcePlan | null;
+}
+
+interface LegacySessionEventsPayload {
+  drawingEvents?: unknown;
+  canvasImageLayers?: unknown;
 }
 
 interface SessionAssetRow {
@@ -125,6 +130,75 @@ function inferAudioExtension(mimeType: string) {
     return "wav";
   }
   return "bin";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function isCanvasImageLayer(value: unknown): value is CanvasImageLayer {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return (
+    typeof value.sourceSessionId === "string" &&
+    typeof value.sourceUrl === "string" &&
+    typeof value.sourceAssetKind === "string" &&
+    Number.isFinite(Number(value.x)) &&
+    Number.isFinite(Number(value.y)) &&
+    Number.isFinite(Number(value.width)) &&
+    Number.isFinite(Number(value.height))
+  );
+}
+
+function normalizeCanvasImageLayers(value: unknown) {
+  return Array.isArray(value) ? value.filter(isCanvasImageLayer).slice(0, 8) : [];
+}
+
+function getPayloadEvents(value: SessionPayloadRow["events"]) {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (isRecord(value) && Array.isArray(value.drawingEvents)) {
+    return value.drawingEvents as DrawingEvent[];
+  }
+
+  return [];
+}
+
+function getPayloadCanvasImageLayers(payload: SessionPayloadRow | null) {
+  const directLayers = normalizeCanvasImageLayers(payload?.canvas_image_layers);
+  if (directLayers.length) {
+    return directLayers;
+  }
+
+  const legacyLayers = isRecord(payload?.events) ? payload.events.canvasImageLayers : null;
+  return normalizeCanvasImageLayers(legacyLayers);
+}
+
+function encodeLegacyEventsPayload(events: DrawingEvent[], canvasImageLayers: CanvasImageLayer[]) {
+  if (!canvasImageLayers.length) {
+    return events;
+  }
+
+  return {
+    drawingEvents: events,
+    canvasImageLayers
+  } satisfies LegacySessionEventsPayload;
+}
+
+function isCanvasImageLayersColumnError(error: unknown) {
+  if (!isSupabaseSchemaOutdatedError(error)) {
+    return false;
+  }
+
+  const message =
+    error && typeof error === "object" && "message" in error && typeof error.message === "string"
+      ? error.message
+      : "";
+  return /canvas_image_layers/i.test(message) || /schema cache/i.test(message);
 }
 
 function getAssetFileName(assetKind: AssetKind) {
@@ -228,7 +302,11 @@ async function getPayloadRow(sessionId: string) {
   return data;
 }
 
-async function upsertPayloadRow(sessionId: string, values: Partial<SessionPayloadRow>) {
+async function upsertPayloadRow(
+  sessionId: string,
+  values: Partial<SessionPayloadRow>,
+  options: { normalizeErrors?: boolean } = {}
+) {
   const admin = getSupabaseAdminClient();
   const { error } = await admin.from("session_payloads").upsert(
     {
@@ -241,7 +319,7 @@ async function upsertPayloadRow(sessionId: string, values: Partial<SessionPayloa
   );
 
   if (error) {
-    throw normalizeSupabaseError(error);
+    throw options.normalizeErrors === false ? error : normalizeSupabaseError(error);
   }
 }
 
@@ -427,10 +505,28 @@ export async function saveSupabaseSessionUpload(sessionId: string, payload: Uplo
   }
 
   try {
-    await upsertPayloadRow(sessionId, {
-      events: payload.events,
-      canvas_image_layers: payload.canvasImageLayers ?? []
-    });
+    const canvasImageLayers = payload.canvasImageLayers ?? [];
+    try {
+      await upsertPayloadRow(
+        sessionId,
+        {
+          events: payload.events,
+          canvas_image_layers: canvasImageLayers
+        },
+        { normalizeErrors: false }
+      );
+    } catch (error) {
+      if (!isCanvasImageLayersColumnError(error)) {
+        throw normalizeSupabaseError(error);
+      }
+
+      console.warn(
+        `[session-upload] ${sessionId} canvas_image_layers column is missing; storing canvas image layers inside events payload.`
+      );
+      await upsertPayloadRow(sessionId, {
+        events: encodeLegacyEventsPayload(payload.events, canvasImageLayers)
+      });
+    }
     console.info(`[session-upload] ${sessionId} drawing events saved`);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save drawing events.";
@@ -597,8 +693,8 @@ export async function getSupabaseSessionDetail(sessionId: string, userId?: strin
 
   return {
     ...normalizeSummary(row),
-    events: payload?.events ?? [],
-    canvasImageLayers: payload?.canvas_image_layers ?? [],
+    events: getPayloadEvents(payload?.events ?? null),
+    canvasImageLayers: getPayloadCanvasImageLayers(payload),
     transcript: payload?.transcript ?? [],
     audioUrl: assets.some((asset) => asset.kind === "audio") ? `/api/sessions/${sessionId}/audio` : null,
     sketchUrl: getAssetUrl("sketch"),

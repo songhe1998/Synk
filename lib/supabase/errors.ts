@@ -1,7 +1,7 @@
 const SUPABASE_SCHEMA_SETUP_MESSAGE =
   "Supabase schema is not installed yet. Run supabase/schema.sql in your Supabase project, then refresh.";
 const SUPABASE_SCHEMA_MIGRATION_MESSAGE =
-  "Supabase schema is out of date. Run supabase/migrations/20260428_website_generation_profiles.sql in your Supabase project, then refresh.";
+  "Supabase schema is out of date. Run supabase/migrations/20260430_canvas_image_layers.sql and any earlier pending migrations in your Supabase project, then refresh.";
 
 function extractErrorParts(error: unknown) {
   if (!error || typeof error !== "object") {

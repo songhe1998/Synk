@@ -143,3 +143,37 @@ test("saveSessionUpload succeeds even when no sketch snapshot is present", async
   assert.equal(detail?.sketchUrl, null);
   assert.equal(detail?.events.length, 2);
 });
+
+test("saveSessionUpload persists canvas image layers", async () => {
+  const session = await sessionStore.createSession("Canvas image reference upload");
+
+  await sessionStore.saveSessionUpload(session.id, {
+    audioBuffer: Buffer.from("fake-webm-audio"),
+    audioMimeType: "audio/webm",
+    audioExtension: "webm",
+    events: [],
+    canvasImageLayers: [
+      {
+        id: "layer-1",
+        sourceSessionId: "source-session",
+        sourceAssetKind: "generatedImage",
+        sourceUrl: "/api/sessions/source-session/assets/generatedImage",
+        title: "Reference image",
+        x: 40,
+        y: 56,
+        width: 320,
+        height: 180,
+        naturalWidth: 1024,
+        naturalHeight: 576
+      }
+    ],
+    canvasWidth: 1280,
+    canvasHeight: 720,
+    durationMs: 120
+  });
+
+  const detail = await sessionStore.getSessionDetail(session.id);
+  assert.equal(detail?.canvasImageLayers.length, 1);
+  assert.equal(detail?.canvasImageLayers[0]?.sourceSessionId, "source-session");
+  assert.equal(detail?.canvasImageLayers[0]?.width, 320);
+});
