@@ -1054,12 +1054,11 @@ export function WebsiteJobShell({
             }}
           >
             <div className="website-edit-panel-copy">
-              <p className="image-info-label">Sketch + voice</p>
+              <p className="image-info-label">Edit</p>
               <p className="website-edit-voice-status">
                 {voiceStatus ||
                   (voiceRecording ? "Recording..." : voiceTranscribing ? "Transcribing..." : "Voice ready.")}
               </p>
-              {editInstruction ? <p className="image-edit-transcript">{editInstruction}</p> : null}
               {editError ? <p className="website-edit-error">{editError}</p> : null}
             </div>
             <div className="website-edit-actions">

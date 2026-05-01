@@ -1471,7 +1471,6 @@ textarea {
 }
 
 .image-edit-voice-status,
-.image-edit-transcript,
 .image-edit-error {
   margin: 0;
   line-height: 1.45;
@@ -1480,11 +1479,6 @@ textarea {
 .image-edit-voice-status {
   color: rgba(255, 247, 239, 0.74);
   font-size: 0.88rem;
-}
-
-.image-edit-transcript {
-  color: rgba(255, 247, 239, 0.9);
-  font-size: 0.94rem;
 }
 
 .image-edit-error {

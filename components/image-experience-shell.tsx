@@ -747,12 +747,11 @@ export function ImageExperienceShell({
         {editActive ? (
           <div className="image-edit-panel">
             <div className="image-edit-panel-copy">
-              <p className="image-info-label">Sketch + voice</p>
+              <p className="image-info-label">Edit</p>
               <p className="image-edit-voice-status">
                 {voiceStatus ||
                   (voiceRecording ? "Recording..." : voiceTranscribing ? "Transcribing..." : "Voice ready.")}
               </p>
-              {editTranscript ? <p className="image-edit-transcript">{editTranscript}</p> : null}
               {editError ? <p className="image-edit-error">{editError}</p> : null}
             </div>
             <div className="image-edit-actions">
