@@ -161,6 +161,11 @@ function shiftTranscriptTokens(tokens: TranscriptToken[], offsetMs: number): Tra
   });
 }
 
+type VoiceTranscriptResult = {
+  text: string;
+  transcriptTokens: TranscriptToken[] | null;
+};
+
 export function WebsiteJobShell({
   session,
   initialJob
@@ -171,7 +176,6 @@ export function WebsiteJobShell({
   const [job, setJob] = useState(initialJob);
   const [pollError, setPollError] = useState<string | null>(null);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
   const [editInstruction, setEditInstruction] = useState("");
   const [editTranscriptTokens, setEditTranscriptTokens] = useState<TranscriptToken[] | null>(null);
   const [editStrokes, setEditStrokes] = useState<WebsiteEditStroke[]>([]);
@@ -190,6 +194,14 @@ export function WebsiteJobShell({
   const voiceChunksRef = useRef<Blob[]>([]);
   const voiceStartedAtRef = useRef<number | null>(null);
   const voiceTimelineOffsetMsRef = useRef(0);
+  const voiceAutoStartedRef = useRef(false);
+  const voiceTranscriptionPromiseRef = useRef<Promise<VoiceTranscriptResult | null> | null>(null);
+  const voiceStopWaitersRef = useRef<
+    Array<{
+      resolve: (result: VoiceTranscriptResult | null) => void;
+      reject: (error: unknown) => void;
+    }>
+  >([]);
 
   const currentStrokeBbox = useMemo(() => computeStrokeBbox(editStrokes), [editStrokes]);
 
@@ -235,7 +247,8 @@ export function WebsiteJobShell({
 
   const previewFrameUrl = `/api/sessions/${session.id}/websites/${job.id}/preview/index.html`;
   const isRenderable = job.status === "succeeded" && Boolean(job.distArchiveUrl);
-  const canEdit = isRenderable && !editSubmitting;
+  const editActive = isRenderable;
+  const canEdit = editActive && !editSubmitting;
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -255,11 +268,20 @@ export function WebsiteJobShell({
     const observer = new ResizeObserver(updateSize);
     observer.observe(overlay);
     return () => observer.disconnect();
-  }, [editOpen]);
+  }, [editActive]);
 
   useEffect(() => {
-    editStartedAtRef.current = editOpen ? performance.now() : null;
-  }, [editOpen]);
+    editStartedAtRef.current = editActive ? performance.now() : null;
+  }, [editActive]);
+
+  useEffect(() => {
+    voiceAutoStartedRef.current = false;
+    setEditStrokes([]);
+    setEditInstruction("");
+    setEditTranscriptTokens(null);
+    setEditError(null);
+    setVoiceStatus(null);
+  }, [job.id]);
 
   useEffect(() => {
     return () => {
@@ -268,9 +290,25 @@ export function WebsiteJobShell({
         recorder.onstop = null;
         recorder.stop();
       }
+      voiceTranscriptionPromiseRef.current = null;
+      voiceStopWaitersRef.current.splice(0).forEach(({ resolve }) => resolve(null));
       stopVoiceStream();
     };
   }, []);
+
+  useEffect(() => {
+    if (!editActive) {
+      voiceAutoStartedRef.current = false;
+      return;
+    }
+
+    if (!canEdit || voiceAutoStartedRef.current || voiceRecording || voiceTranscribing || voiceRecorderRef.current) {
+      return;
+    }
+
+    voiceAutoStartedRef.current = true;
+    void startVoiceRecording();
+  }, [canEdit, editActive, job.id, voiceRecording, voiceTranscribing]);
 
   function getEditTimeMs() {
     if (editStartedAtRef.current === null) {
@@ -284,10 +322,14 @@ export function WebsiteJobShell({
     voiceStreamRef.current = null;
   }
 
-  async function submitVoiceRecording(audioBlob: Blob, durationMs: number, timelineOffsetMs: number) {
+  async function submitVoiceRecording(
+    audioBlob: Blob,
+    durationMs: number,
+    timelineOffsetMs: number
+  ): Promise<VoiceTranscriptResult | null> {
     if (!audioBlob.size) {
       setVoiceStatus(null);
-      return;
+      return null;
     }
 
     setVoiceTranscribing(true);
@@ -326,16 +368,22 @@ export function WebsiteJobShell({
         throw new Error("Voice transcription did not return usable text.");
       }
 
+      const shiftedTranscriptTokens = shiftTranscriptTokens(transcriptTokens, timelineOffsetMs);
       setEditInstruction(text);
-      setEditTranscriptTokens(shiftTranscriptTokens(transcriptTokens, timelineOffsetMs));
+      setEditTranscriptTokens(shiftedTranscriptTokens);
       setVoiceStatus(
         payload.transcriptApproximate
           ? "Voice transcribed with approximate timing."
           : "Voice transcribed with timing."
       );
+      return {
+        text,
+        transcriptTokens: shiftedTranscriptTokens
+      };
     } catch (error) {
       setEditError(error instanceof Error ? error.message : "Failed to transcribe the voice request.");
       setVoiceStatus(null);
+      return null;
     } finally {
       setVoiceTranscribing(false);
     }
@@ -376,13 +424,23 @@ export function WebsiteJobShell({
         const durationMs = startedAt === null ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
         const offsetMs = voiceTimelineOffsetMsRef.current;
         const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
+        const waiters = voiceStopWaitersRef.current.splice(0);
 
         voiceRecorderRef.current = null;
         voiceStartedAtRef.current = null;
         voiceChunksRef.current = [];
         setVoiceRecording(false);
         stopVoiceStream();
-        void submitVoiceRecording(blob, durationMs, offsetMs);
+        const transcriptionPromise = submitVoiceRecording(blob, durationMs, offsetMs);
+        voiceTranscriptionPromiseRef.current = transcriptionPromise;
+        transcriptionPromise
+          .then((result) => waiters.forEach(({ resolve }) => resolve(result)))
+          .catch((error) => waiters.forEach(({ reject }) => reject(error)))
+          .finally(() => {
+            if (voiceTranscriptionPromiseRef.current === transcriptionPromise) {
+              voiceTranscriptionPromiseRef.current = null;
+            }
+          });
       };
 
       voiceRecorderRef.current = recorder;
@@ -398,26 +456,31 @@ export function WebsiteJobShell({
     }
   }
 
-  function stopVoiceRecording() {
-    const recorder = voiceRecorderRef.current;
-    if (!recorder || recorder.state === "inactive") {
-      return;
-    }
-
-    recorder.stop();
+  function getExistingVoiceResult(): VoiceTranscriptResult | null {
+    const text = editInstruction.trim();
+    return text
+      ? {
+          text,
+          transcriptTokens: editTranscriptTokens
+        }
+      : null;
   }
 
-  function cancelVoiceRecording() {
-    const recorder = voiceRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.onstop = null;
-      recorder.stop();
+  function stopVoiceRecordingAndTranscribe() {
+    if (voiceTranscriptionPromiseRef.current) {
+      return voiceTranscriptionPromiseRef.current;
     }
-    voiceRecorderRef.current = null;
-    voiceStartedAtRef.current = null;
-    voiceChunksRef.current = [];
-    setVoiceRecording(false);
-    stopVoiceStream();
+
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return Promise.resolve(getExistingVoiceResult());
+    }
+
+    const stopPromise = new Promise<VoiceTranscriptResult | null>((resolve, reject) => {
+      voiceStopWaitersRef.current.push({ resolve, reject });
+    });
+    recorder.stop();
+    return stopPromise;
   }
 
   function getOverlayPoint(event: PointerEvent<SVGSVGElement>) {
@@ -435,7 +498,7 @@ export function WebsiteJobShell({
   }
 
   function beginEditStroke(event: PointerEvent<SVGSVGElement>) {
-    if (!canEdit || !editOpen) {
+    if (!canEdit) {
       return;
     }
 
@@ -822,13 +885,7 @@ export function WebsiteJobShell({
   }
 
   async function submitWebsiteEdit() {
-    if (!canEdit || voiceRecording || voiceTranscribing) {
-      return;
-    }
-
-    const trimmedInstruction = editInstruction.trim();
-    if (!trimmedInstruction) {
-      setEditError("Add an edit request before submitting.");
+    if (!canEdit || voiceTranscribing) {
       return;
     }
 
@@ -837,23 +894,31 @@ export function WebsiteJobShell({
       return;
     }
 
-    const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
-    const frame = iframeRef.current;
-    const doc = frame?.contentDocument;
-    const annotation: WebsiteEditAnnotation = {
-      viewportWidth: overlaySize.width,
-      viewportHeight: overlaySize.height,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      path: doc?.location.pathname || "/",
-      scrollX: doc?.defaultView?.scrollX ?? 0,
-      scrollY: doc?.defaultView?.scrollY ?? 0,
-      bbox: currentStrokeBbox,
-      strokes: submittedStrokes
-    };
-
     setEditSubmitting(true);
     setEditError(null);
     try {
+      const voiceResult =
+        voiceRecording || voiceTranscriptionPromiseRef.current
+          ? await stopVoiceRecordingAndTranscribe()
+          : getExistingVoiceResult();
+      const trimmedInstruction = voiceResult?.text.trim() ?? "";
+      if (!trimmedInstruction) {
+        throw new Error("Voice request was not captured.");
+      }
+
+      const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
+      const frame = iframeRef.current;
+      const doc = frame?.contentDocument;
+      const annotation: WebsiteEditAnnotation = {
+        viewportWidth: overlaySize.width,
+        viewportHeight: overlaySize.height,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        path: doc?.location.pathname || "/",
+        scrollX: doc?.defaultView?.scrollX ?? 0,
+        scrollY: doc?.defaultView?.scrollY ?? 0,
+        bbox: computeStrokeBbox(submittedStrokes),
+        strokes: submittedStrokes
+      };
       const annotatedScreenshotDataUrl = await buildAnnotatedScreenshotDataUrl(annotation);
       const response = await fetch(`/api/sessions/${session.id}/websites/${job.id}/edits`, {
         method: "POST",
@@ -864,7 +929,7 @@ export function WebsiteJobShell({
           instructionText: trimmedInstruction,
           annotation,
           domCandidates: collectDomCandidates(),
-          transcriptTokens: editTranscriptTokens,
+          transcriptTokens: voiceResult?.transcriptTokens ?? editTranscriptTokens,
           annotatedScreenshotDataUrl
         })
       });
@@ -877,6 +942,7 @@ export function WebsiteJobShell({
       window.location.assign(`/sessions/${session.id}/websites/${nextJob.id}`);
     } catch (error) {
       setEditError(error instanceof Error ? error.message : "Failed to start website edit.");
+      voiceAutoStartedRef.current = false;
       setEditSubmitting(false);
     }
   }
@@ -947,20 +1013,6 @@ export function WebsiteJobShell({
                 Dist
               </a>
             ) : null}
-            <button
-              type="button"
-              className={`image-hud-button ${editOpen ? "website-edit-active" : ""}`}
-              onClick={() => {
-                if (editOpen) {
-                  cancelVoiceRecording();
-                }
-                setEditOpen((value) => !value);
-                setEditError(null);
-                setVoiceStatus(null);
-              }}
-            >
-              Edit
-            </button>
             <button type="button" className="image-hud-button" onClick={() => setInfoOpen((value) => !value)}>
               {infoOpen ? "Close info" : "Info"}
             </button>
@@ -975,7 +1027,7 @@ export function WebsiteJobShell({
             className="website-preview-frame"
             loading="eager"
           />
-          {editOpen ? (
+          {editActive ? (
             <svg
               ref={overlayRef}
               className="website-edit-overlay"
@@ -993,7 +1045,7 @@ export function WebsiteJobShell({
         </div>
 
         {pollError ? <div className="video-floating-alert">{pollError}</div> : null}
-        {editOpen ? (
+        {editActive ? (
           <form
             className="website-edit-panel"
             onSubmit={(event) => {
@@ -1001,58 +1053,39 @@ export function WebsiteJobShell({
               void submitWebsiteEdit();
             }}
           >
-            <textarea
-              value={editInstruction}
-              onChange={(event) => {
-                setEditInstruction(event.target.value);
-                setEditTranscriptTokens(null);
-                setVoiceStatus(null);
-              }}
-              placeholder="Make this a little bigger"
-              rows={3}
-              disabled={editSubmitting || voiceRecording || voiceTranscribing}
-            />
-            <div className="website-edit-actions">
-              <button
-                type="button"
-                className={`image-hud-button website-voice-button ${voiceRecording ? "recording" : ""}`}
-                onClick={() => {
-                  if (voiceRecording) {
-                    stopVoiceRecording();
-                  } else {
-                    void startVoiceRecording();
-                  }
-                }}
-                disabled={editSubmitting || voiceTranscribing}
-              >
-                {voiceRecording ? "Stop voice" : voiceTranscribing ? "Transcribing" : "Voice"}
-              </button>
-              <button
-                type="button"
-                className="image-hud-button"
-                onClick={() => {
-                  setEditStrokes([]);
-                  setEditInstruction("");
-                  setEditTranscriptTokens(null);
-                  setEditError(null);
-                  setVoiceStatus(null);
-                }}
-                disabled={
-                  editSubmitting || voiceRecording || (!editStrokes.length && !editInstruction && !editTranscriptTokens)
-                }
-              >
-                Clear
-              </button>
-              <button
-                type="submit"
-                className="image-hud-button image-hud-button-strong"
-                disabled={editSubmitting || voiceRecording || voiceTranscribing}
-              >
-                {editSubmitting ? "Starting" : "Apply"}
-              </button>
+            <div className="website-edit-panel-copy">
+              <p className="image-info-label">Sketch + voice</p>
+              <p className="website-edit-voice-status">
+                {voiceStatus ||
+                  (voiceRecording ? "Recording..." : voiceTranscribing ? "Transcribing..." : "Voice ready.")}
+              </p>
+              {editInstruction ? <p className="image-edit-transcript">{editInstruction}</p> : null}
+              {editError ? <p className="website-edit-error">{editError}</p> : null}
             </div>
-            {voiceStatus ? <p className="website-edit-voice-status">{voiceStatus}</p> : null}
-            {editError ? <p className="website-edit-error">{editError}</p> : null}
+            <div className="website-edit-actions">
+              {editStrokes.length ? (
+                <button
+                  type="button"
+                  className="image-hud-button"
+                  onClick={() => {
+                    setEditStrokes([]);
+                    setEditError(null);
+                  }}
+                  disabled={editSubmitting || voiceTranscribing}
+                >
+                  Clear
+                </button>
+              ) : null}
+              {editStrokes.length ? (
+                <button
+                  type="submit"
+                  className="image-hud-button image-hud-button-strong image-edit-go-button"
+                  disabled={editSubmitting || voiceTranscribing}
+                >
+                  {editSubmitting ? "Starting" : "Go"}
+                </button>
+              ) : null}
+            </div>
           </form>
         ) : null}
 

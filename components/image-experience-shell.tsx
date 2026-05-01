@@ -166,6 +166,11 @@ function shiftTranscriptTokens(tokens: TranscriptToken[], offsetMs: number): Tra
   });
 }
 
+type VoiceTranscriptResult = {
+  text: string;
+  transcriptTokens: TranscriptToken[] | null;
+};
+
 export function ImageExperienceShell({
   session,
   canEditImage = true
@@ -175,7 +180,6 @@ export function ImageExperienceShell({
 }) {
   const [sessionData, setSessionData] = useState(session);
   const [infoOpen, setInfoOpen] = useState(false);
-  const [editOpen, setEditOpen] = useState(false);
   const [editTranscript, setEditTranscript] = useState("");
   const [editTranscriptTokens, setEditTranscriptTokens] = useState<TranscriptToken[] | null>(null);
   const [editStrokes, setEditStrokes] = useState<ImageEditStroke[]>([]);
@@ -196,9 +200,18 @@ export function ImageExperienceShell({
   const voiceChunksRef = useRef<Blob[]>([]);
   const voiceStartedAtRef = useRef<number | null>(null);
   const voiceTimelineOffsetMsRef = useRef(0);
+  const voiceAutoStartedRef = useRef(false);
+  const voiceTranscriptionPromiseRef = useRef<Promise<VoiceTranscriptResult | null> | null>(null);
+  const voiceStopWaitersRef = useRef<
+    Array<{
+      resolve: (result: VoiceTranscriptResult | null) => void;
+      reject: (error: unknown) => void;
+    }>
+  >([]);
 
   const primaryImage = useMemo(() => getPrimaryImage(sessionData), [sessionData]);
-  const canEdit = canEditImage && Boolean(primaryImage.assetKind && primaryImage.url) && !editSubmitting;
+  const editActive = canEditImage && Boolean(primaryImage.assetKind && primaryImage.url);
+  const canEdit = editActive && !editSubmitting;
   const currentStrokeBbox = useMemo(() => computeStrokeBbox(editStrokes), [editStrokes]);
 
   function updateImageRenderSize() {
@@ -237,6 +250,12 @@ export function ImageExperienceShell({
 
   useEffect(() => {
     setImageRenderSize(null);
+    voiceAutoStartedRef.current = false;
+    setEditStrokes([]);
+    setEditTranscript("");
+    setEditTranscriptTokens(null);
+    setEditError(null);
+    setVoiceStatus(null);
   }, [primaryImage.url]);
 
   useEffect(() => {
@@ -277,14 +296,14 @@ export function ImageExperienceShell({
       observer.disconnect();
       window.removeEventListener("resize", updateSize);
     };
-  }, [editOpen, primaryImage.url]);
+  }, [editActive, primaryImage.url]);
 
   useEffect(() => {
-    editStartedAtRef.current = editOpen ? performance.now() : null;
-    if (editOpen) {
+    editStartedAtRef.current = editActive ? performance.now() : null;
+    if (editActive) {
       setInfoOpen(false);
     }
-  }, [editOpen]);
+  }, [editActive]);
 
   useEffect(() => {
     return () => {
@@ -293,9 +312,25 @@ export function ImageExperienceShell({
         recorder.onstop = null;
         recorder.stop();
       }
+      voiceTranscriptionPromiseRef.current = null;
+      voiceStopWaitersRef.current.splice(0).forEach(({ resolve }) => resolve(null));
       stopVoiceStream();
     };
   }, []);
+
+  useEffect(() => {
+    if (!editActive) {
+      voiceAutoStartedRef.current = false;
+      return;
+    }
+
+    if (!canEdit || voiceAutoStartedRef.current || voiceRecording || voiceTranscribing || voiceRecorderRef.current) {
+      return;
+    }
+
+    voiceAutoStartedRef.current = true;
+    void startVoiceRecording();
+  }, [canEdit, editActive, primaryImage.url, voiceRecording, voiceTranscribing]);
 
   function getEditTimeMs() {
     if (editStartedAtRef.current === null) {
@@ -309,10 +344,14 @@ export function ImageExperienceShell({
     voiceStreamRef.current = null;
   }
 
-  async function submitVoiceRecording(audioBlob: Blob, durationMs: number, timelineOffsetMs: number) {
+  async function submitVoiceRecording(
+    audioBlob: Blob,
+    durationMs: number,
+    timelineOffsetMs: number
+  ): Promise<VoiceTranscriptResult | null> {
     if (!audioBlob.size) {
       setVoiceStatus(null);
-      return;
+      return null;
     }
 
     setVoiceTranscribing(true);
@@ -351,16 +390,22 @@ export function ImageExperienceShell({
         throw new Error("Voice transcription did not return usable text.");
       }
 
+      const shiftedTranscriptTokens = shiftTranscriptTokens(transcriptTokens, timelineOffsetMs);
       setEditTranscript(text);
-      setEditTranscriptTokens(shiftTranscriptTokens(transcriptTokens, timelineOffsetMs));
+      setEditTranscriptTokens(shiftedTranscriptTokens);
       setVoiceStatus(
         payload.transcriptApproximate
           ? "Voice transcribed with approximate timing."
           : "Voice transcribed with timing."
       );
+      return {
+        text,
+        transcriptTokens: shiftedTranscriptTokens
+      };
     } catch (error) {
       setEditError(error instanceof Error ? error.message : "Failed to transcribe the voice request.");
       setVoiceStatus(null);
+      return null;
     } finally {
       setVoiceTranscribing(false);
     }
@@ -401,13 +446,23 @@ export function ImageExperienceShell({
         const durationMs = startedAt === null ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
         const offsetMs = voiceTimelineOffsetMsRef.current;
         const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || "audio/webm" });
+        const waiters = voiceStopWaitersRef.current.splice(0);
 
         voiceRecorderRef.current = null;
         voiceStartedAtRef.current = null;
         voiceChunksRef.current = [];
         setVoiceRecording(false);
         stopVoiceStream();
-        void submitVoiceRecording(blob, durationMs, offsetMs);
+        const transcriptionPromise = submitVoiceRecording(blob, durationMs, offsetMs);
+        voiceTranscriptionPromiseRef.current = transcriptionPromise;
+        transcriptionPromise
+          .then((result) => waiters.forEach(({ resolve }) => resolve(result)))
+          .catch((error) => waiters.forEach(({ reject }) => reject(error)))
+          .finally(() => {
+            if (voiceTranscriptionPromiseRef.current === transcriptionPromise) {
+              voiceTranscriptionPromiseRef.current = null;
+            }
+          });
       };
 
       voiceRecorderRef.current = recorder;
@@ -423,26 +478,31 @@ export function ImageExperienceShell({
     }
   }
 
-  function stopVoiceRecording() {
-    const recorder = voiceRecorderRef.current;
-    if (!recorder || recorder.state === "inactive") {
-      return;
-    }
-
-    recorder.stop();
+  function getExistingVoiceResult(): VoiceTranscriptResult | null {
+    const text = editTranscript.trim();
+    return text
+      ? {
+          text,
+          transcriptTokens: editTranscriptTokens
+        }
+      : null;
   }
 
-  function cancelVoiceRecording() {
-    const recorder = voiceRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      recorder.onstop = null;
-      recorder.stop();
+  function stopVoiceRecordingAndTranscribe() {
+    if (voiceTranscriptionPromiseRef.current) {
+      return voiceTranscriptionPromiseRef.current;
     }
-    voiceRecorderRef.current = null;
-    voiceStartedAtRef.current = null;
-    voiceChunksRef.current = [];
-    setVoiceRecording(false);
-    stopVoiceStream();
+
+    const recorder = voiceRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return Promise.resolve(getExistingVoiceResult());
+    }
+
+    const stopPromise = new Promise<VoiceTranscriptResult | null>((resolve, reject) => {
+      voiceStopWaitersRef.current.push({ resolve, reject });
+    });
+    recorder.stop();
+    return stopPromise;
   }
 
   function getOverlayPoint(event: PointerEvent<SVGSVGElement>) {
@@ -460,7 +520,7 @@ export function ImageExperienceShell({
   }
 
   function beginEditStroke(event: PointerEvent<SVGSVGElement>) {
-    if (!canEdit || !editOpen) {
+    if (!canEdit) {
       return;
     }
 
@@ -563,13 +623,7 @@ export function ImageExperienceShell({
   }
 
   async function submitImageEdit() {
-    if (!canEdit || voiceRecording || voiceTranscribing || !primaryImage.assetKind) {
-      return;
-    }
-
-    const transcriptText = editTranscript.trim();
-    if (!transcriptText) {
-      setEditError("Record a voice edit request before submitting.");
+    if (!canEdit || voiceTranscribing || !primaryImage.assetKind) {
       return;
     }
 
@@ -578,18 +632,26 @@ export function ImageExperienceShell({
       return;
     }
 
-    const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
-    const annotation: ImageEditAnnotation = {
-      viewportWidth: overlaySize.width,
-      viewportHeight: overlaySize.height,
-      devicePixelRatio: window.devicePixelRatio || 1,
-      bbox: computeStrokeBbox(submittedStrokes),
-      strokes: submittedStrokes
-    };
-
     setEditSubmitting(true);
     setEditError(null);
     try {
+      const voiceResult =
+        voiceRecording || voiceTranscriptionPromiseRef.current
+          ? await stopVoiceRecordingAndTranscribe()
+          : getExistingVoiceResult();
+      const transcriptText = voiceResult?.text.trim() ?? "";
+      if (!transcriptText) {
+        throw new Error("Voice request was not captured.");
+      }
+
+      const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
+      const annotation: ImageEditAnnotation = {
+        viewportWidth: overlaySize.width,
+        viewportHeight: overlaySize.height,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        bbox: computeStrokeBbox(submittedStrokes),
+        strokes: submittedStrokes
+      };
       const annotatedImageDataUrl = await buildAnnotatedImageDataUrl(annotation);
       const response = await fetch(`/api/sessions/${sessionData.id}/image-edits`, {
         method: "POST",
@@ -599,7 +661,7 @@ export function ImageExperienceShell({
         body: JSON.stringify({
           sourceAssetKind: primaryImage.assetKind,
           transcriptText,
-          transcriptTokens: editTranscriptTokens,
+          transcriptTokens: voiceResult?.transcriptTokens ?? editTranscriptTokens,
           annotation,
           annotatedImageDataUrl
         })
@@ -615,28 +677,17 @@ export function ImageExperienceShell({
       }
 
       setSessionData(nextSession);
-      setEditOpen(false);
       setEditStrokes([]);
       setEditTranscript("");
       setEditTranscriptTokens(null);
+      voiceAutoStartedRef.current = false;
       setVoiceStatus("Edit applied.");
     } catch (error) {
       setEditError(error instanceof Error ? error.message : "Image edit failed.");
+      voiceAutoStartedRef.current = false;
     } finally {
       setEditSubmitting(false);
     }
-  }
-
-  function toggleEditOpen() {
-    if (editOpen) {
-      cancelVoiceRecording();
-      setEditOpen(false);
-      return;
-    }
-
-    setEditError(null);
-    setVoiceStatus(null);
-    setEditOpen(true);
   }
 
   return (
@@ -647,7 +698,7 @@ export function ImageExperienceShell({
             <img src={primaryImage.url} alt={primaryImage.label} className="image-experience-background" />
             <div ref={imageShellRef} className="image-experience-image-shell">
               <div
-                className={`image-edit-target ${editOpen ? "editing" : ""}`}
+                className={`image-edit-target ${editActive ? "editing" : ""}`}
                 style={imageRenderSize ? { width: imageRenderSize.width, height: imageRenderSize.height } : undefined}
               >
                 <img
@@ -657,7 +708,7 @@ export function ImageExperienceShell({
                   className="image-experience-image"
                   onLoad={updateImageRenderSize}
                 />
-                {editOpen ? (
+                {editActive ? (
                   <svg
                     ref={overlayRef}
                     className="image-edit-overlay"
@@ -687,62 +738,47 @@ export function ImageExperienceShell({
           </Link>
 
           <div className="image-header-actions">
-            <button
-              type="button"
-              className={`image-hud-button ${editOpen ? "image-edit-active" : ""}`}
-              onClick={toggleEditOpen}
-              disabled={!canEditImage || !primaryImage.assetKind || editSubmitting}
-              title={!canEditImage ? "Sign in to edit this image." : undefined}
-            >
-              {editOpen ? "Close edit" : "Edit"}
-            </button>
             <button type="button" className="image-hud-button" onClick={() => setInfoOpen((value) => !value)}>
               {infoOpen ? "Close info" : "Info"}
             </button>
           </div>
         </header>
 
-        {editOpen ? (
+        {editActive ? (
           <div className="image-edit-panel">
             <div className="image-edit-panel-copy">
-              <p className="image-info-label">Sketch + voice edit</p>
+              <p className="image-info-label">Sketch + voice</p>
               <p className="image-edit-voice-status">
                 {voiceStatus ||
-                  (editStrokes.length
-                    ? "Record what the marked area should become."
-                    : "Draw over the part of the image you want to change.")}
+                  (voiceRecording ? "Recording..." : voiceTranscribing ? "Transcribing..." : "Voice ready.")}
               </p>
               {editTranscript ? <p className="image-edit-transcript">{editTranscript}</p> : null}
               {editError ? <p className="image-edit-error">{editError}</p> : null}
             </div>
             <div className="image-edit-actions">
-              <button
-                type="button"
-                className={`image-hud-button ${voiceRecording ? "recording" : ""}`}
-                onClick={voiceRecording ? stopVoiceRecording : startVoiceRecording}
-                disabled={!canEdit || voiceTranscribing || editSubmitting}
-              >
-                {voiceRecording ? "Stop voice" : voiceTranscribing ? "Transcribing..." : "Record voice"}
-              </button>
-              <button
-                type="button"
-                className="image-hud-button"
-                onClick={() => {
-                  setEditStrokes([]);
-                  setEditError(null);
-                }}
-                disabled={editSubmitting || voiceRecording || voiceTranscribing}
-              >
-                Clear marks
-              </button>
-              <button
-                type="button"
-                className="image-hud-button image-hud-button-strong"
-                onClick={submitImageEdit}
-                disabled={!canEdit || editSubmitting || voiceRecording || voiceTranscribing || !editStrokes.length || !editTranscript}
-              >
-                {editSubmitting ? "Editing..." : "Apply edit"}
-              </button>
+              {editStrokes.length ? (
+                <button
+                  type="button"
+                  className="image-hud-button"
+                  onClick={() => {
+                    setEditStrokes([]);
+                    setEditError(null);
+                  }}
+                  disabled={editSubmitting || voiceTranscribing}
+                >
+                  Clear
+                </button>
+              ) : null}
+              {editStrokes.length ? (
+                <button
+                  type="button"
+                  className="image-hud-button image-hud-button-strong image-edit-go-button"
+                  onClick={submitImageEdit}
+                  disabled={!canEdit || editSubmitting || voiceTranscribing}
+                >
+                  {editSubmitting ? "Editing..." : "Go"}
+                </button>
+              ) : null}
             </div>
           </div>
         ) : null}
