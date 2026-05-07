@@ -12,6 +12,9 @@ export type RecorderGalleryTarget = "image" | "video" | "world" | "website";
 export type RecorderGalleryStatus = "pending" | "running" | "ready" | "failed";
 export type RecorderGalleryPreviewKind = "placeholder" | "sketch" | "source";
 
+const STALE_UNSTARTED_SESSION_MS = 30 * 60 * 1000;
+const STALE_UNSTARTED_SESSION_DETAIL = "The capture did not finish uploading. Start a new sketch to try again.";
+
 export interface RecorderGalleryItem {
   sessionId: string;
   title: string;
@@ -47,6 +50,19 @@ function inferTargetFromResultUrl(preferredResultUrl?: string | null): RecorderG
 
 function worldHasRenderableSplats(world: WorldAssetSnapshot | null) {
   return Boolean(world?.spz100kUrl || world?.spz500kUrl || world?.spzFullResUrl);
+}
+
+function isStaleCreatedSession(session: Pick<SessionSummary, "status" | "createdAt">) {
+  if (session.status !== "created") {
+    return false;
+  }
+
+  const createdAt = new Date(session.createdAt).getTime();
+  if (!Number.isFinite(createdAt)) {
+    return false;
+  }
+
+  return Date.now() - createdAt > STALE_UNSTARTED_SESSION_MS;
 }
 
 function getImageThumbnail(session: SessionDetail) {
@@ -117,14 +133,15 @@ function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const sourceAssetKind = sourceImageUrl?.assetKind ?? null;
   const sketchThumbnailUrl = session.sketchUrl;
   const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
-  const failed = session.status === "failed";
+  const stalled = isStaleCreatedSession(session) && !sourceImageUrl;
+  const failed = session.status === "failed" || stalled;
 
   return {
     sessionId: session.id,
     title: session.title,
     createdAt: session.createdAt,
     target: "image",
-    href: sourceImageUrl ? `/sessions/${session.id}/image` : null,
+    href: !failed && sourceImageUrl ? `/sessions/${session.id}/image` : null,
     thumbnailUrl,
     sketchThumbnailUrl,
     sourceImageUrl: sourceImageUrl?.url ?? null,
@@ -133,7 +150,7 @@ function buildImageGalleryItem(session: SessionDetail): RecorderGalleryItem {
     status: failed ? "failed" : sourceImageUrl ? "ready" : session.status === "ready" ? "running" : "pending",
     statusLabel: failed ? "Failed" : sourceImageUrl ? "Ready" : session.status === "processing" ? "Transcribing" : "Rendering",
     detail: failed
-      ? session.errorMessage || "Image generation failed."
+      ? session.errorMessage || (stalled ? STALE_UNSTARTED_SESSION_DETAIL : "Image generation failed.")
       : sourceImageUrl
         ? "Image ready."
         : session.status === "processing"
@@ -150,7 +167,8 @@ function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const sketchThumbnailUrl = session.sketchUrl;
   const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && job.videoUrl);
-  const failed = Boolean(job && job.status === "failed");
+  const stalled = isStaleCreatedSession(session) && !job && !sourceImageUrl;
+  const failed = Boolean(job && job.status === "failed") || stalled;
 
   return {
     sessionId: session.id,
@@ -176,7 +194,7 @@ function buildVideoGalleryItem(session: SessionDetail): RecorderGalleryItem {
               ? "Rendering"
               : "Rendering",
     detail: failed
-      ? job?.errorMessage || "Video generation failed."
+      ? job?.errorMessage || (stalled ? STALE_UNSTARTED_SESSION_DETAIL : "Video generation failed.")
       : ready
         ? "Video ready."
         : sourceImageUrl
@@ -193,7 +211,8 @@ function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const sketchThumbnailUrl = session.sketchUrl;
   const thumbnailUrl = sourceImageUrl?.url ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && worldHasRenderableSplats(job.world));
-  const failed = Boolean(job && job.status === "failed");
+  const stalled = isStaleCreatedSession(session) && !job && !sourceImageUrl;
+  const failed = Boolean(job && job.status === "failed") || stalled;
 
   return {
     sessionId: session.id,
@@ -209,7 +228,7 @@ function buildWorldGalleryItem(session: SessionDetail): RecorderGalleryItem {
     status: failed ? "failed" : ready ? "ready" : sourceImageUrl || job ? "running" : "pending",
     statusLabel: failed ? "Failed" : ready ? "Ready" : job?.status === "queued" ? "Queued" : "Building",
     detail: failed
-      ? job?.errorMessage || "3D world generation failed."
+      ? job?.errorMessage || (stalled ? STALE_UNSTARTED_SESSION_DETAIL : "3D world generation failed.")
       : ready
         ? "3D world ready."
         : sourceImageUrl
@@ -225,7 +244,8 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
   const sketchThumbnailUrl = session.sketchUrl;
   const thumbnailUrl = sourceImageUrl ?? sketchThumbnailUrl ?? null;
   const ready = Boolean(job && job.status === "succeeded" && job.distArchiveUrl);
-  const failed = Boolean(job && job.status === "failed");
+  const stalled = isStaleCreatedSession(session) && !job && !sourceImageUrl;
+  const failed = Boolean(job && job.status === "failed") || stalled;
 
   return {
     sessionId: session.id,
@@ -251,7 +271,7 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
               ? "Exporting"
               : "Generating",
     detail: failed
-      ? job?.errorMessage || "Website generation failed."
+      ? job?.errorMessage || (stalled ? STALE_UNSTARTED_SESSION_DETAIL : "Website generation failed.")
       : ready
         ? "Website ready."
         : job?.statusDetail ||
@@ -264,7 +284,8 @@ function buildWebsiteGalleryItem(session: SessionDetail): RecorderGalleryItem {
 
 export function buildPlaceholderGalleryItem(summary: SessionSummary): RecorderGalleryItem {
   const target = inferTargetFromResultUrl(summary.preferredResultUrl);
-  const failed = summary.status === "failed";
+  const stalled = isStaleCreatedSession(summary);
+  const failed = summary.status === "failed" || stalled;
 
   return {
     sessionId: summary.id,
@@ -280,7 +301,7 @@ export function buildPlaceholderGalleryItem(summary: SessionSummary): RecorderGa
     status: failed ? "failed" : summary.status === "ready" ? "running" : "pending",
     statusLabel: failed ? "Failed" : summary.status === "processing" ? "Transcribing" : "Loading",
     detail: failed
-      ? summary.errorMessage || "This session failed."
+      ? summary.errorMessage || (stalled ? STALE_UNSTARTED_SESSION_DETAIL : "This session failed.")
       : summary.status === "processing"
         ? "Transcribing your narration."
         : "Loading the latest preview.",

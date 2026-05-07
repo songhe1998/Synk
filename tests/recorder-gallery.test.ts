@@ -255,6 +255,52 @@ test("placeholder gallery items do not fall back to the session detail page when
   assert.equal(item.status, "pending");
 });
 
+test("stale created sessions stop showing as indefinitely loading", () => {
+  const item = buildGalleryItemFromSession(
+    makeSession({
+      status: "created",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      audioUrl: null,
+      sketchUrl: null,
+      annotatedSketchUrl: null,
+      generatedImageUrl: null,
+      generatedImageLabeledUrl: null
+    }),
+    "website"
+  );
+
+  assert.equal(item.target, "website");
+  assert.equal(item.status, "failed");
+  assert.equal(item.statusLabel, "Failed");
+  assert.equal(item.href, null);
+});
+
+test("stale created placeholders stop showing as indefinitely loading", () => {
+  const item = buildPlaceholderGalleryItem({
+    id: "session-4",
+    title: "Session Four",
+    status: "created",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    durationMs: 0,
+    audioMimeType: null,
+    canvasWidth: 0,
+    canvasHeight: 0,
+    transcriptApproximate: false,
+    analysisReasoningEffort: "medium",
+    imageSizePreset: "medium",
+    imageGenerationProfile: "pro",
+    imageFollowMode: "auto",
+    errorMessage: null,
+    preferredResultUrl: null
+  });
+
+  assert.equal(item.status, "failed");
+  assert.equal(item.statusLabel, "Failed");
+  assert.equal(item.href, null);
+});
+
 test("job merge helpers keep the latest synchronized job at the front of the session detail", () => {
   const initialVideoSession = makeSession({
     videoJobs: [makeVideoJob({ id: "video-1", status: "queued", createdAt: "2026-04-18T10:03:00.000Z" })]
