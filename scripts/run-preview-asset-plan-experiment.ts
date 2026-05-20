@@ -169,7 +169,7 @@ function buildCodexPlannerPrompt(transcript: string) {
 }
 
 async function runCodexAssetPlanner(previewImagePath: string, transcript: string) {
-  const tempDir = await mkdtemp(path.join(tmpdir(), "synk-asset-plan-"));
+  const tempDir = await mkdtemp(path.join(tmpdir(), "skratch-asset-plan-"));
   const promptPath = path.join(tempDir, "prompt.txt");
   const schemaPath = path.join(tempDir, "schema.json");
   const outputPath = path.join(tempDir, "plan.json");

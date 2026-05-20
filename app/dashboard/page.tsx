@@ -57,7 +57,7 @@ export default async function DashboardPage() {
       <section className="hero-card dashboard-hero">
         <div className="hero-copy">
           <p className="eyebrow">Dashboard</p>
-          <h1>Your Synk sessions</h1>
+          <h1>Your Skratch sessions</h1>
           <p className="hero-text">
             Your sketches, images, videos, and worlds stay tied to your account so you can come back from any device.
           </p>

@@ -8,7 +8,7 @@ let dataRoot = "";
 let sessionStore: typeof import("../lib/session-store");
 
 before(async () => {
-  dataRoot = await mkdtemp(path.join(os.tmpdir(), "synk-session-store-"));
+  dataRoot = await mkdtemp(path.join(os.tmpdir(), "skratch-session-store-"));
   process.env.SESSION_DATA_ROOT = dataRoot;
   delete process.env.NEXT_PUBLIC_SUPABASE_URL;
   delete process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;

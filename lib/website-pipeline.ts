@@ -1814,7 +1814,7 @@ async function runWebsiteFastGenerationJob(sessionId: string, jobId: string) {
         targetPreviewImageUrl,
         referenceImages,
         metadata: {
-          source: "synk-product-website-fast",
+          source: "skratch-product-website-fast",
           sessionId,
           jobId,
           phase: "generation"
@@ -2341,7 +2341,7 @@ async function runWebsiteFastEditJob(sessionId: string, jobId: string) {
             }
           : null,
         metadata: {
-          source: "synk-product-website-fast",
+          source: "skratch-product-website-fast",
           sessionId,
           jobId,
           parentJobId: parentJob.id,

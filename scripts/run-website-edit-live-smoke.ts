@@ -100,7 +100,7 @@ function makeTargetResolution(): WebsiteEditTargetResolution {
 
 async function main() {
   loadEnvFile(path.join(process.cwd(), ".env.local"));
-  const tempDir = await mkdtempAsync(path.join(tmpdir(), "synk-website-edit-"));
+  const tempDir = await mkdtempAsync(path.join(tmpdir(), "skratch-website-edit-"));
   const archivePath = path.join(tempDir, "parent-code.tar.gz");
   const expectedText = "Edited Headline Benchmark";
 

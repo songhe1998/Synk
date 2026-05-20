@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: synk-demo
+    name: skratch-demo
     runtime: node
     region: virginia
     plan: starter
@@ -30,6 +30,6 @@ services:
       - key: SESSION_DATA_ROOT
         value: /var/data/sessions
     disk:
-      name: synk-data
+      name: skratch-data
       mountPath: /var/data
       sizeGB: 10

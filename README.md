@@ -1,4 +1,4 @@
-# Synk Demo
+# Skratch Demo
 
 An internal demo for keeping microphone capture tied to the active canvas, replaying drawing events and microphone audio on the same timeline, and turning the finished sketch plus narration into a generated image, video, or 3D world.
 
@@ -83,7 +83,7 @@ npm run start
 
 ## Deploy on Render
 
-This repo now includes a [render.yaml](/Users/songhewang/Desktop/synk/render.yaml) Blueprint for Render.
+This repo now includes a [render.yaml](./render.yaml) Blueprint for Render.
 
 What it configures:
 - A Node web service running `npm install && npm run build`
@@ -95,7 +95,7 @@ What it configures:
 Recommended deployment flow:
 1. Push this repo to GitHub/GitLab/Bitbucket.
 2. In Render, create a new Blueprint from the repo.
-3. Review the generated `synk-demo` web service.
+3. Review the generated `skratch-demo` web service.
 4. Set `OPENAI_API_KEY` in the Render dashboard when prompted.
 5. If you want website generation in production, also set:
    - `CODEX_AUTH_JSON_B64`
@@ -107,7 +107,7 @@ Recommended deployment flow:
 Important:
 - This app stores all session assets on the local filesystem. On Render, that means you should keep the persistent disk. Without it, session data will disappear on redeploys and restarts.
 - The Blueprint uses the `starter` plan because persistent disks require a paid web service.
-- Region is set to `virginia` by default in [render.yaml](/Users/songhewang/Desktop/synk/render.yaml); change it if you want a different region before deploying.
+- Region is set to `virginia` by default in [render.yaml](./render.yaml); change it if you want a different region before deploying.
 
 ## Notes
 

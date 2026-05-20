@@ -189,7 +189,7 @@ export async function startWorldGenerationJob({
       prompt: session.analysis.generationPrompt,
       displayName: job.displayName,
       modelPreset,
-      tags: ["synk", modelPreset, sessionId.slice(0, 8)]
+      tags: ["skratch", modelPreset, sessionId.slice(0, 8)]
     });
 
     const updatedJob = await updateWorldJob(sessionId, job.id, (current) => ({

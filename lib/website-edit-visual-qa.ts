@@ -117,7 +117,7 @@ export async function captureWebsitePreviewScreenshot({
   viewportWidth: number;
   viewportHeight: number;
 }) {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "synk-website-edit-preview-"));
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "skratch-website-edit-preview-"));
   let server: Server | null = null;
   try {
     await writePreviewFilesToDir(previewFiles, tempDir);

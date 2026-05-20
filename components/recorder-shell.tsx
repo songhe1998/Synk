@@ -54,7 +54,7 @@ const VIDEO_MODEL_PRESETS: VideoModelPreset[] = ["quality", "lite"];
 const VIDEO_PIPELINE_MODES: VideoPipelineMode[] = ["normal", "dynamic"];
 const WEBSITE_GENERATION_PROFILES: WebsiteGenerationProfile[] = ["fast", "econ"];
 const GALLERY_CACHE_VERSION = "v1";
-const GALLERY_IMAGE_DRAG_MIME = "application/x-synk-gallery-image";
+const GALLERY_IMAGE_DRAG_MIME = "application/x-skratch-gallery-image";
 
 type OutputTarget = RecorderGalleryTarget;
 type RecorderPhase = "idle" | "arming" | "listening" | "paused" | "handoff" | "error";
@@ -163,7 +163,7 @@ function sortGalleryItems(items: RecorderGalleryItem[]) {
 }
 
 function getGalleryCacheKey(viewerId: string | null) {
-  return `synk:gallery:${GALLERY_CACHE_VERSION}:${viewerId ?? "guest"}`;
+  return `skratch:gallery:${GALLERY_CACHE_VERSION}:${viewerId ?? "guest"}`;
 }
 
 function cloneDrawingEvents(events: DrawingEvent[]) {
@@ -1692,7 +1692,7 @@ export function RecorderShell({
 
         <header className="recorder-experience-header">
           <div className="recorder-brandline">
-            <div className="recorder-brand-mark">Synk</div>
+            <div className="recorder-brand-mark">Skratch</div>
             <p className="recorder-brand-copy-inline">
               Sketch and speak anything into existence
             </p>

@@ -14,7 +14,7 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Synk Demo",
+  title: "Skratch Demo",
   description: "Record drawing and speech, then replay them on the same timeline."
 };
 
