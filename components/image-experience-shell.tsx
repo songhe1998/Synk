@@ -3,9 +3,20 @@
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent } from "react";
+import { assignAnnotationColors, DEFAULT_ANNOTATION_COLOR } from "@/lib/annotation-color";
 import { AssetKind, ImageEditAnnotation, ImageEditPoint, ImageEditStroke, SessionDetail, TranscriptToken } from "@/lib/types";
 
 const MAX_EDIT_STROKE_POINTS = 160;
+const EDIT_STROKE_WIDTH = 4;
+const EDIT_STROKE_ALPHA = 0.95;
+
+type ColoredImageEditStroke = ImageEditStroke & {
+  color?: string;
+};
+
+type ColoredImageEditAnnotation = Omit<ImageEditAnnotation, "strokes"> & {
+  strokes: ColoredImageEditStroke[];
+};
 
 type EditableImageAssetKind = Extract<
   AssetKind,
@@ -109,14 +120,15 @@ function sampleStrokePoints(points: ImageEditPoint[]) {
   return sampled;
 }
 
-function prepareEditStrokesForSubmit(strokes: ImageEditStroke[]): ImageEditStroke[] {
+function prepareEditStrokesForSubmit(strokes: ColoredImageEditStroke[]): ColoredImageEditStroke[] {
   return strokes.map((stroke) => {
     const points = sampleStrokePoints(stroke.points);
     const pointTimes = points
       .map((point) => point.tMs)
       .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
     return {
-      ...stroke,
+      id: stroke.id,
+      color: stroke.color,
       points,
       startMs:
         typeof stroke.startMs === "number" && Number.isFinite(stroke.startMs)
@@ -166,10 +178,60 @@ function shiftTranscriptTokens(tokens: TranscriptToken[], offsetMs: number): Tra
   });
 }
 
+function formatInfoTimestamp(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+
+  return `${new Date(timestamp).toISOString().replace("T", " ").slice(0, 16)} UTC`;
+}
+
+function formatInfoBlock(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return trimmed;
+  }
+}
+
+function formatAssetKindLabel(assetKind: AssetKind) {
+  switch (assetKind) {
+    case "editedImage":
+      return "Edited image";
+    case "generatedImageLabeled":
+      return "Generated image";
+    case "generatedImagePlain":
+      return "Plain generated image";
+    case "generatedImage":
+      return "Generated image";
+    case "generatedVideoSourceImage":
+      return "Video source image";
+    case "sketch":
+      return "Sketch";
+    case "annotatedSketch":
+      return "Annotated sketch";
+    case "videoAnnotatedSketch":
+      return "Video annotated sketch";
+  }
+}
+
 type VoiceTranscriptResult = {
   text: string;
   transcriptTokens: TranscriptToken[] | null;
 };
+
+interface ImageRestoreReferenceItem {
+  id: string;
+  revisionNumber: number;
+  label: string;
+  imageUrl: string;
+}
 
 export function ImageExperienceShell({
   session,
@@ -182,9 +244,11 @@ export function ImageExperienceShell({
   const [infoOpen, setInfoOpen] = useState(false);
   const [editTranscript, setEditTranscript] = useState("");
   const [editTranscriptTokens, setEditTranscriptTokens] = useState<TranscriptToken[] | null>(null);
-  const [editStrokes, setEditStrokes] = useState<ImageEditStroke[]>([]);
+  const [editStrokes, setEditStrokes] = useState<ColoredImageEditStroke[]>([]);
   const [editError, setEditError] = useState<string | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
+  const [restoreSubmitting, setRestoreSubmitting] = useState(false);
+  const [selectedRestoreRevision, setSelectedRestoreRevision] = useState<number | null>(null);
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceTranscribing, setVoiceTranscribing] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
@@ -193,6 +257,11 @@ export function ImageExperienceShell({
   const imageShellRef = useRef<HTMLDivElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const overlayRef = useRef<SVGSVGElement | null>(null);
+  const colorSamplingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const colorSamplingCacheRef = useRef<{
+    key: string;
+    imageData: ImageData;
+  } | null>(null);
   const activeStrokeIdRef = useRef<string | null>(null);
   const editStartedAtRef = useRef<number | null>(null);
   const voiceRecorderRef = useRef<MediaRecorder | null>(null);
@@ -213,6 +282,39 @@ export function ImageExperienceShell({
   const editActive = canEditImage && Boolean(primaryImage.assetKind && primaryImage.url);
   const canEdit = editActive && !editSubmitting;
   const currentStrokeBbox = useMemo(() => computeStrokeBbox(editStrokes), [editStrokes]);
+  const initialImageUrl =
+    sessionData.generatedImageLabeledUrl ?? sessionData.generatedImagePlainUrl ?? sessionData.generatedImageUrl;
+  const imageEditHistory = sessionData.imageEditHistory ?? [];
+  const latestRevisionNumber = imageEditHistory.reduce((max, item) => Math.max(max, item.revisionNumber), 0);
+  const restoreReferenceItems = useMemo<ImageRestoreReferenceItem[]>(() => {
+    const items: ImageRestoreReferenceItem[] = [];
+    if (initialImageUrl) {
+      items.push({
+        id: "initial",
+        revisionNumber: 0,
+        label: "Initial",
+        imageUrl: initialImageUrl
+      });
+    }
+    imageEditHistory.forEach((edit) => {
+      items.push({
+        id: edit.id,
+        revisionNumber: edit.revisionNumber,
+        label: `Edit ${edit.revisionNumber}`,
+        imageUrl: edit.imageUrl
+      });
+    });
+    return items;
+  }, [imageEditHistory, initialImageUrl]);
+  const selectedRestoreItem =
+    selectedRestoreRevision === null
+      ? null
+      : restoreReferenceItems.find((item) => item.revisionNumber === selectedRestoreRevision) ?? null;
+  const restoreSelectionAvailable =
+    Boolean(selectedRestoreItem) &&
+    selectedRestoreItem!.revisionNumber < latestRevisionNumber &&
+    !editStrokes.length;
+  const canRestoreFromSelection = restoreSelectionAvailable && !editSubmitting && !restoreSubmitting;
 
   function updateImageRenderSize() {
     const shell = imageShellRef.current;
@@ -250,6 +352,7 @@ export function ImageExperienceShell({
 
   useEffect(() => {
     setImageRenderSize(null);
+    colorSamplingCacheRef.current = null;
     voiceAutoStartedRef.current = false;
     setEditStrokes([]);
     setEditTranscript("");
@@ -519,6 +622,61 @@ export function ImageExperienceShell({
     };
   }
 
+  function getCurrentColorSamplingImageData() {
+    const image = imageRef.current;
+    const width = Math.max(1, Math.round(overlaySize.width));
+    const height = Math.max(1, Math.round(overlaySize.height));
+    if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight || !width || !height) {
+      return null;
+    }
+
+    const key = `${primaryImage.url ?? ""}:${width}x${height}:${image.naturalWidth}x${image.naturalHeight}`;
+    if (colorSamplingCacheRef.current?.key === key) {
+      return colorSamplingCacheRef.current.imageData;
+    }
+
+    const canvas = colorSamplingCanvasRef.current ?? document.createElement("canvas");
+    colorSamplingCanvasRef.current = canvas;
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      return null;
+    }
+
+    context.clearRect(0, 0, width, height);
+    context.drawImage(image, 0, 0, width, height);
+    const imageData = context.getImageData(0, 0, width, height);
+    colorSamplingCacheRef.current = { key, imageData };
+    return imageData;
+  }
+
+  function assignStrokeColors(strokes: ColoredImageEditStroke[]) {
+    const imageData = getCurrentColorSamplingImageData();
+    if (!imageData) {
+      return strokes.map((stroke) => ({
+        ...stroke,
+        color: stroke.color ?? DEFAULT_ANNOTATION_COLOR
+      }));
+    }
+
+    try {
+      const assignment = assignAnnotationColors(imageData, strokes, {
+        alpha: EDIT_STROKE_ALPHA,
+        strokeWidth: EDIT_STROKE_WIDTH
+      });
+      return strokes.map((stroke) => ({
+        ...stroke,
+        color: assignment.colorsByStrokeId[stroke.id] ?? stroke.color ?? DEFAULT_ANNOTATION_COLOR
+      }));
+    } catch {
+      return strokes.map((stroke) => ({
+        ...stroke,
+        color: stroke.color ?? DEFAULT_ANNOTATION_COLOR
+      }));
+    }
+  }
+
   function beginEditStroke(event: PointerEvent<SVGSVGElement>) {
     if (!canEdit) {
       return;
@@ -560,29 +718,33 @@ export function ImageExperienceShell({
   }
 
   function endEditStroke(event: PointerEvent<SVGSVGElement>) {
-    if (activeStrokeIdRef.current) {
+    const strokeId = activeStrokeIdRef.current;
+    if (strokeId) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+      setEditStrokes((strokes) => assignStrokeColors(strokes));
     }
     activeStrokeIdRef.current = null;
   }
 
   function drawAnnotationOnCanvas(
     context: CanvasRenderingContext2D,
-    annotation: ImageEditAnnotation,
+    annotation: ColoredImageEditAnnotation,
     scaleX: number,
     scaleY: number
   ) {
     const strokeScale = (scaleX + scaleY) / 2;
+    const lineWidth = Math.max(1.5, EDIT_STROKE_WIDTH * strokeScale);
     context.save();
-    context.strokeStyle = "#ff4f38";
-    context.fillStyle = "rgba(255, 79, 56, 0.14)";
-    context.lineWidth = Math.max(5, 8 * strokeScale);
+    context.globalAlpha = EDIT_STROKE_ALPHA;
+    context.lineWidth = lineWidth;
     context.lineCap = "round";
     context.lineJoin = "round";
     annotation.strokes.forEach((stroke) => {
       if (!stroke.points.length) {
         return;
       }
+      context.strokeStyle = stroke.color ?? DEFAULT_ANNOTATION_COLOR;
+      context.lineWidth = lineWidth;
       context.beginPath();
       stroke.points.forEach((point, index) => {
         const x = point.x * scaleX;
@@ -598,7 +760,7 @@ export function ImageExperienceShell({
     context.restore();
   }
 
-  async function buildAnnotatedImageDataUrl(annotation: ImageEditAnnotation) {
+  async function buildAnnotatedImageDataUrl(annotation: ColoredImageEditAnnotation) {
     const image = imageRef.current;
     if (!image || !image.complete || !image.naturalWidth || !image.naturalHeight) {
       throw new Error("The image is still loading.");
@@ -645,7 +807,7 @@ export function ImageExperienceShell({
       }
 
       const submittedStrokes = prepareEditStrokesForSubmit(editStrokes);
-      const annotation: ImageEditAnnotation = {
+      const annotation: ColoredImageEditAnnotation = {
         viewportWidth: overlaySize.width,
         viewportHeight: overlaySize.height,
         devicePixelRatio: window.devicePixelRatio || 1,
@@ -680,6 +842,7 @@ export function ImageExperienceShell({
       setEditStrokes([]);
       setEditTranscript("");
       setEditTranscriptTokens(null);
+      setSelectedRestoreRevision(null);
       voiceAutoStartedRef.current = false;
       setVoiceStatus("Edit applied.");
     } catch (error) {
@@ -687,6 +850,43 @@ export function ImageExperienceShell({
       voiceAutoStartedRef.current = false;
     } finally {
       setEditSubmitting(false);
+    }
+  }
+
+  async function submitReferenceRestore() {
+    if (!selectedRestoreItem || !canRestoreFromSelection) {
+      return;
+    }
+
+    setRestoreSubmitting(true);
+    setEditError(null);
+    try {
+      const response = await fetch(`/api/sessions/${sessionData.id}/image-edits/restore`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          referenceRevisionNumber: selectedRestoreItem.revisionNumber
+        })
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(readRouteError(payload, "Reference restore failed."));
+      }
+
+      const nextSession = payload.session as SessionDetail | undefined;
+      if (!nextSession) {
+        throw new Error("Reference restore returned no session payload.");
+      }
+
+      setSessionData(nextSession);
+      setSelectedRestoreRevision(null);
+      setVoiceStatus("Reference restore applied.");
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Reference restore failed.");
+    } finally {
+      setRestoreSubmitting(false);
     }
   }
 
@@ -719,7 +919,12 @@ export function ImageExperienceShell({
                     onPointerCancel={endEditStroke}
                   >
                     {editStrokes.map((stroke) => (
-                      <path key={stroke.id} d={strokePath(stroke.points)} className="image-edit-stroke" />
+                      <path
+                        key={stroke.id}
+                        d={strokePath(stroke.points)}
+                        className="image-edit-stroke"
+                        style={{ stroke: stroke.color ?? DEFAULT_ANNOTATION_COLOR }}
+                      />
                     ))}
                   </svg>
                 ) : null}
@@ -744,42 +949,69 @@ export function ImageExperienceShell({
           </div>
         </header>
 
-        {editActive ? (
-          <div className="image-edit-panel">
-            <div className="image-edit-panel-copy">
-              <p className="image-info-label">Edit</p>
-              <p className="image-edit-voice-status">
-                {voiceStatus ||
-                  (voiceRecording ? "Recording..." : voiceTranscribing ? "Transcribing..." : "Voice ready.")}
-              </p>
-              {editError ? <p className="image-edit-error">{editError}</p> : null}
+        {restoreReferenceItems.length ? (
+          <aside className="image-edit-history-rail" aria-label="Image edit history">
+            <div className="image-edit-history-rail-body">
+              {restoreReferenceItems.map((item) => {
+                const selected = selectedRestoreRevision === item.revisionNumber;
+                const current = item.revisionNumber === latestRevisionNumber;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`image-edit-history-thumb${selected ? " selected" : ""}${current ? " current" : ""}`}
+                    title={
+                      current
+                        ? `${item.label} is the current image`
+                        : selected
+                          ? `${item.label} selected as restore reference`
+                          : `Use ${item.label} as restore reference`
+                    }
+                    aria-label={
+                      current
+                        ? `${item.label}, current image`
+                        : selected
+                          ? `${item.label}, selected as restore reference`
+                          : `Select ${item.label} as restore reference`
+                    }
+                    aria-pressed={selected}
+                    onClick={() =>
+                      setSelectedRestoreRevision((revision) =>
+                        revision === item.revisionNumber ? null : item.revisionNumber
+                      )
+                    }
+                    disabled={restoreSubmitting}
+                  >
+                    <img src={item.imageUrl} alt="" />
+                    <span>{item.revisionNumber === 0 ? "0" : item.revisionNumber}</span>
+                  </button>
+                );
+              })}
             </div>
-            <div className="image-edit-actions">
-              {editStrokes.length ? (
-                <button
-                  type="button"
-                  className="image-hud-button"
-                  onClick={() => {
-                    setEditStrokes([]);
-                    setEditError(null);
-                  }}
-                  disabled={editSubmitting || voiceTranscribing}
-                >
-                  Clear
-                </button>
-              ) : null}
-              {editStrokes.length ? (
-                <button
-                  type="button"
-                  className="image-hud-button image-hud-button-strong image-edit-go-button"
-                  onClick={submitImageEdit}
-                  disabled={!canEdit || editSubmitting || voiceTranscribing}
-                >
-                  {editSubmitting ? "Editing..." : "Go"}
-                </button>
-              ) : null}
-            </div>
-          </div>
+          </aside>
+        ) : null}
+
+        {editActive && editStrokes.length ? (
+          <button
+            type="button"
+            className="image-hud-button image-hud-button-strong image-edit-go-button image-edit-go-floating"
+            onClick={submitImageEdit}
+            disabled={!canEdit || editSubmitting || voiceTranscribing}
+            aria-label="Apply image edit"
+          >
+            {editSubmitting ? "Editing..." : "Go"}
+          </button>
+        ) : null}
+
+        {restoreSelectionAvailable ? (
+          <button
+            type="button"
+            className="image-hud-button image-hud-button-strong image-restore-floating"
+            onClick={submitReferenceRestore}
+            disabled={!canRestoreFromSelection}
+          >
+            {restoreSubmitting ? "Restoring..." : "Restore"}
+          </button>
         ) : null}
 
         {infoOpen ? (
@@ -807,6 +1039,95 @@ export function ImageExperienceShell({
               <section className="image-info-section">
                 <p className="image-info-label">Final prompt</p>
                 <p className="image-info-copy">{sessionData.analysis.generationPrompt}</p>
+              </section>
+            ) : null}
+
+            {initialImageUrl || imageEditHistory.length ? (
+              <section className="image-info-section">
+                <div className="image-info-section-heading">
+                  <p className="image-info-label">Image timeline</p>
+                  <p className="image-info-copy image-info-muted">
+                    {imageEditHistory.length === 1
+                      ? "1 edit recorded"
+                      : `${imageEditHistory.length} edits recorded`}
+                  </p>
+                </div>
+
+                <div className="image-edit-history">
+                  {initialImageUrl ? (
+                    <article className="image-edit-history-card">
+                      <div className="image-edit-history-card-header">
+                        <div>
+                          <h3 className="image-edit-history-title">Initial image</h3>
+                          <p className="image-edit-history-meta">No edits applied</p>
+                        </div>
+                      </div>
+                      <div className="image-edit-history-images single">
+                        <figure className="image-edit-history-image-panel">
+                          <img src={initialImageUrl} alt="Initial generated image" />
+                          <figcaption>Generated image before edits</figcaption>
+                        </figure>
+                      </div>
+                      {sessionData.analysis?.generationPrompt ? (
+                        <div className="image-edit-history-detail">
+                          <p className="image-info-label">Generation prompt</p>
+                          <pre className="image-info-copy-pre">{sessionData.analysis.generationPrompt}</pre>
+                        </div>
+                      ) : null}
+                    </article>
+                  ) : null}
+
+                  {imageEditHistory.map((edit) => (
+                    <article key={edit.id} className="image-edit-history-card">
+                      <div className="image-edit-history-card-header">
+                        <div>
+                          <h3 className="image-edit-history-title">Edit {edit.revisionNumber}</h3>
+                          <p className="image-edit-history-meta">{formatInfoTimestamp(edit.createdAt)}</p>
+                        </div>
+                        <span className="image-edit-history-badge">{formatAssetKindLabel(edit.sourceAssetKind)}</span>
+                      </div>
+
+                      <div className="image-edit-history-images">
+                        <figure className="image-edit-history-image-panel">
+                          <img src={edit.imageUrl} alt={`Edited result ${edit.revisionNumber}`} />
+                          <figcaption>Edited result</figcaption>
+                        </figure>
+                        <figure className="image-edit-history-image-panel">
+                          <img src={edit.annotatedImageUrl} alt={`Marked image ${edit.revisionNumber}`} />
+                          <figcaption>Marked input</figcaption>
+                        </figure>
+                      </div>
+
+                      {edit.transcriptText ? (
+                        <div className="image-edit-history-detail">
+                          <p className="image-info-label">Voice request</p>
+                          <p className="image-info-copy">{edit.transcriptText}</p>
+                        </div>
+                      ) : null}
+
+                      {edit.targetDescription ? (
+                        <div className="image-edit-history-detail">
+                          <p className="image-info-label">Target summary</p>
+                          <p className="image-info-copy">{edit.targetDescription}</p>
+                        </div>
+                      ) : null}
+
+                      {edit.requestedChange ? (
+                        <div className="image-edit-history-detail">
+                          <p className="image-info-label">Color operations</p>
+                          <pre className="image-info-copy-pre">{formatInfoBlock(edit.requestedChange)}</pre>
+                        </div>
+                      ) : null}
+
+                      {edit.editPrompt ? (
+                        <div className="image-edit-history-detail">
+                          <p className="image-info-label">Generated edit prompt</p>
+                          <pre className="image-info-copy-pre">{formatInfoBlock(edit.editPrompt)}</pre>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
               </section>
             ) : null}
 

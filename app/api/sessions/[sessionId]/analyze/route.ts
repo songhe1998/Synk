@@ -43,7 +43,8 @@ export async function POST(
       sessionId,
       reasoningEffort: parseReasoningEffort(body?.reasoningEffort),
       imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile),
-      imageFollowMode: parseImageFollowMode(body?.imageFollowMode)
+      imageFollowMode: parseImageFollowMode(body?.imageFollowMode),
+      force: body?.force === true
     });
     return NextResponse.json(updatedSession);
   } catch (error) {

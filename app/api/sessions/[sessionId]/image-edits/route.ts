@@ -37,6 +37,10 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function parseStrokeColor(value: unknown) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/i.test(value.trim()) ? value.trim().toLowerCase() : null;
+}
+
 function parseAnnotation(value: unknown): ImageEditAnnotation | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -56,6 +60,7 @@ function parseAnnotation(value: unknown): ImageEditAnnotation | null {
   const strokes = annotation.strokes
     .map((stroke) => ({
       id: typeof stroke.id === "string" && stroke.id ? stroke.id : crypto.randomUUID(),
+      color: parseStrokeColor(stroke.color),
       startMs: isFiniteNumber(stroke.startMs) ? stroke.startMs : null,
       endMs: isFiniteNumber(stroke.endMs) ? stroke.endMs : null,
       points: Array.isArray(stroke.points)

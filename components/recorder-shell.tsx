@@ -236,7 +236,7 @@ export function RecorderShell({
   const createSessionConfigRef = useRef({
     analysisReasoningEffort: "medium" as AnalysisReasoningEffort,
     imageSizePreset: "medium" as ImageSizePreset,
-    imageGenerationProfile: "fast" as ImageGenerationProfile,
+    imageGenerationProfile: "pro" as ImageGenerationProfile,
     imageFollowMode: "auto" as ImageFollowMode,
     websiteGenerationProfile: "fast" as WebsiteGenerationProfile
   });
@@ -246,7 +246,7 @@ export function RecorderShell({
   const [phase, setPhase] = useState<RecorderPhase>("idle");
   const [analysisReasoningEffort, setAnalysisReasoningEffort] = useState<AnalysisReasoningEffort>("medium");
   const [imageSizePreset, setImageSizePreset] = useState<ImageSizePreset>("medium");
-  const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("fast");
+  const [imageGenerationProfile, setImageGenerationProfile] = useState<ImageGenerationProfile>("pro");
   const [websiteGenerationProfile, setWebsiteGenerationProfile] = useState<WebsiteGenerationProfile>("fast");
   const [imageFollowMode, setImageFollowMode] = useState<ImageFollowMode>("auto");
   const [videoModelPreset, setVideoModelPreset] = useState<VideoModelPreset>("quality");

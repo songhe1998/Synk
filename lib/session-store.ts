@@ -8,6 +8,8 @@ import {
   DrawingEvent,
   ImageFollowMode,
   ImageGenerationProfile,
+  ImageEditHistoryItem,
+  ImageEditAnnotation,
   ImageSizePreset,
   SceneAnalysis,
   SessionDetail,
@@ -15,7 +17,7 @@ import {
   VideoSourcePlan,
   TranscriptToken
 } from "@/lib/types";
-import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
+import { shouldUseSupabaseSessionStore } from "@/lib/supabase/config";
 import {
   createSupabaseSession,
   deleteSupabaseSession,
@@ -29,9 +31,11 @@ import {
   markSupabaseSessionProcessing,
   saveSupabaseSessionAnalysis,
   saveSupabaseSessionAsset,
+  saveSupabaseSessionImageEditHistoryItem,
   saveSupabaseSessionTranscript,
   saveSupabaseSessionUpload,
   saveSupabaseSessionVideoSourcePlan,
+  getSupabaseSessionImageEditAsset,
   updateSupabaseSessionPreferences
 } from "@/lib/supabase-session-store";
 import { listLocalVideoJobs, listVideoJobs } from "@/lib/video-store";
@@ -44,7 +48,7 @@ const MAX_SESSIONS = 8;
 const GALLERY_SESSION_LIMIT = 8;
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
-const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
+const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
 const DEFAULT_IMAGE_FOLLOW_MODE: ImageFollowMode = "auto";
 
 interface SessionMeta extends SessionSummary {}
@@ -59,6 +63,23 @@ interface UploadPayload {
   durationMs: number;
   sketchBuffer?: Buffer | null;
   canvasImageLayers?: CanvasImageLayer[];
+}
+
+type StoredImageEditHistoryItem = Omit<ImageEditHistoryItem, "imageUrl" | "annotatedImageUrl"> & {
+  imageFileName: string;
+  annotatedImageFileName: string;
+};
+
+export interface SaveImageEditHistoryItemInput {
+  sessionId: string;
+  sourceAssetKind: AssetKind;
+  transcriptText: string;
+  targetDescription: string;
+  requestedChange: string;
+  editPrompt: string;
+  editedImage: Buffer;
+  annotatedImage: Buffer;
+  annotation?: ImageEditAnnotation | null;
 }
 
 function normalizeSummary(summary: SessionSummary | (Partial<SessionSummary> & { id: string; title: string; status: SessionSummary["status"]; createdAt: string; updatedAt: string; durationMs: number; audioMimeType: string | null; canvasWidth: number; canvasHeight: number; transcriptApproximate: boolean; errorMessage: string | null; })) {
@@ -115,6 +136,19 @@ function getAnalysisPath(sessionId: string) {
 
 function getVideoSourcePlanPath(sessionId: string) {
   return path.join(getSessionDir(sessionId), "video-source-plan.json");
+}
+
+function getImageEditHistoryPath(sessionId: string) {
+  return path.join(getSessionDir(sessionId), "image-edit-history.json");
+}
+
+function getImageEditsDir(sessionId: string) {
+  return path.join(getSessionDir(sessionId), "image-edits");
+}
+
+function getImageEditAssetPath(sessionId: string, editId: string, assetName: "image" | "annotation") {
+  const fileName = assetName === "image" ? `${editId}.png` : `${editId}-annotation.png`;
+  return path.join(getImageEditsDir(sessionId), fileName);
 }
 
 function getAssetPath(sessionId: string, assetKind: AssetKind) {
@@ -236,6 +270,31 @@ async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
   }
 }
 
+function imageEditAssetUrl(sessionId: string, editId: string, assetName: "image" | "annotation", version?: string) {
+  const suffix = version ? `?v=${encodeURIComponent(version)}` : "";
+  return `/api/sessions/${sessionId}/image-edits/${editId}/${assetName}${suffix}`;
+}
+
+function hydrateImageEditHistory(
+  sessionId: string,
+  items: StoredImageEditHistoryItem[],
+  version?: string
+): ImageEditHistoryItem[] {
+  return items.map((item) => ({
+    id: item.id,
+    revisionNumber: item.revisionNumber,
+    createdAt: item.createdAt,
+    sourceAssetKind: item.sourceAssetKind,
+    transcriptText: item.transcriptText,
+    targetDescription: item.targetDescription,
+    requestedChange: item.requestedChange,
+    editPrompt: item.editPrompt,
+    annotation: item.annotation ?? null,
+    imageUrl: imageEditAssetUrl(sessionId, item.id, "image", version),
+    annotatedImageUrl: imageEditAssetUrl(sessionId, item.id, "annotation", version)
+  }));
+}
+
 function inferAudioExtension(mimeType: string) {
   if (mimeType.includes("webm")) {
     return "webm";
@@ -328,7 +387,7 @@ export async function createSession(
   },
   userId?: string
 ) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     if (!userId) {
       throw new Error("Authenticated user is required before creating a session.");
     }
@@ -362,7 +421,7 @@ export async function createSession(
 }
 
 export async function listRecentSessions(userId?: string, limit = 24) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     if (!userId) {
       return [];
     }
@@ -390,7 +449,7 @@ export async function listLocalRecentSessions(limit = 24) {
 }
 
 export async function listGallerySessions(userId?: string) {
-  if (!hasSupabaseAdminConfig()) {
+  if (!shouldUseSupabaseSessionStore()) {
     return listRecentSessions(userId, GALLERY_SESSION_LIMIT);
   }
 
@@ -404,7 +463,7 @@ export async function listGallerySessions(userId?: string) {
 }
 
 export async function deleteSession(sessionId: string, userId?: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     if (!userId) {
       throw new Error("Authenticated user is required before deleting a session.");
     }
@@ -432,7 +491,7 @@ export async function updateSessionPreferences(
     imageFollowMode?: ImageFollowMode;
   }
 ) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return updateSupabaseSessionPreferences(sessionId, preferences);
   }
 
@@ -457,7 +516,7 @@ export async function updateSessionPreferences(
 }
 
 export async function saveSessionUpload(sessionId: string, payload: UploadPayload) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return saveSupabaseSessionUpload(sessionId, payload);
   }
 
@@ -493,7 +552,7 @@ export async function saveSessionUpload(sessionId: string, payload: UploadPayloa
 }
 
 export async function markSessionProcessing(sessionId: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return markSupabaseSessionProcessing(sessionId);
   }
 
@@ -513,7 +572,7 @@ export async function markSessionProcessing(sessionId: string) {
 }
 
 export async function saveSessionTranscript(sessionId: string, tokens: TranscriptToken[], approximate: boolean) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return saveSupabaseSessionTranscript(sessionId, tokens, approximate);
   }
 
@@ -536,7 +595,7 @@ export async function saveSessionTranscript(sessionId: string, tokens: Transcrip
 }
 
 export async function saveSessionAnalysis(sessionId: string, analysis: SceneAnalysis) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return saveSupabaseSessionAnalysis(sessionId, analysis);
   }
 
@@ -558,7 +617,7 @@ export async function saveSessionAnalysis(sessionId: string, analysis: SceneAnal
 }
 
 export async function saveSessionVideoSourcePlan(sessionId: string, plan: VideoSourcePlan) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return saveSupabaseSessionVideoSourcePlan(sessionId, plan);
   }
 
@@ -580,7 +639,7 @@ export async function saveSessionVideoSourcePlan(sessionId: string, plan: VideoS
 }
 
 export async function saveSessionAsset(sessionId: string, assetKind: AssetKind, buffer: Buffer) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return saveSupabaseSessionAsset(sessionId, assetKind, buffer);
   }
 
@@ -602,8 +661,79 @@ export async function saveSessionAsset(sessionId: string, assetKind: AssetKind, 
   return nextSummary;
 }
 
+export async function saveSessionImageEditHistoryItem({
+  sessionId,
+  sourceAssetKind,
+  transcriptText,
+  targetDescription,
+  requestedChange,
+  editPrompt,
+  editedImage,
+  annotatedImage,
+  annotation
+}: SaveImageEditHistoryItemInput) {
+  if (shouldUseSupabaseSessionStore()) {
+    return saveSupabaseSessionImageEditHistoryItem({
+      sessionId,
+      sourceAssetKind,
+      transcriptText,
+      targetDescription,
+      requestedChange,
+      editPrompt,
+      editedImage,
+      annotatedImage,
+      annotation
+    });
+  }
+
+  const summary = await readMeta(sessionId);
+  if (!summary) {
+    throw new Error("Session not found");
+  }
+
+  const history = await readJsonFile<StoredImageEditHistoryItem[]>(getImageEditHistoryPath(sessionId), []);
+  const revisionNumber = history.reduce((max, item) => Math.max(max, item.revisionNumber), 0) + 1;
+  const editId = `edit-${String(revisionNumber).padStart(3, "0")}`;
+  const imageFileName = `${editId}.png`;
+  const annotatedImageFileName = `${editId}-annotation.png`;
+  const createdAt = new Date().toISOString();
+
+  await mkdir(getImageEditsDir(sessionId), { recursive: true });
+  await Promise.all([
+    writeFile(getImageEditAssetPath(sessionId, editId, "image"), editedImage),
+    writeFile(getImageEditAssetPath(sessionId, editId, "annotation"), annotatedImage)
+  ]);
+
+  const nextHistory: StoredImageEditHistoryItem[] = [
+    ...history,
+    {
+      id: editId,
+      revisionNumber,
+      createdAt,
+      sourceAssetKind,
+      transcriptText,
+      targetDescription,
+      requestedChange,
+      editPrompt,
+      annotation: annotation ?? null,
+      imageFileName,
+      annotatedImageFileName
+    }
+  ];
+  await writeJsonAtomic(getImageEditHistoryPath(sessionId), nextHistory);
+
+  const nextSummary: SessionSummary = {
+    ...summary,
+    updatedAt: createdAt,
+    errorMessage: null
+  };
+
+  await upsertSummary(nextSummary);
+  return nextSummary;
+}
+
 export async function markSessionFailed(sessionId: string, error: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return markSupabaseSessionFailed(sessionId, error);
   }
 
@@ -624,7 +754,7 @@ export async function markSessionFailed(sessionId: string, error: string) {
 }
 
 export async function getSessionDetail(sessionId: string, userId?: string): Promise<SessionDetail | null> {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return getSupabaseSessionDetail(sessionId, userId);
   }
 
@@ -637,6 +767,11 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
   const canvasImageLayers = await readJsonFile<CanvasImageLayer[]>(getCanvasImageLayersPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
+  const imageEditHistory = hydrateImageEditHistory(
+    sessionId,
+    await readJsonFile<StoredImageEditHistoryItem[]>(getImageEditHistoryPath(sessionId), []),
+    summary.updatedAt
+  );
   const worldJobs = await listLocalWorldJobs(sessionId);
   const videoJobs = await listLocalVideoJobs(sessionId);
   const websiteJobs = await listLocalWebsiteJobs(sessionId);
@@ -684,6 +819,7 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
     editedImageUrl: editedImageExists
       ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(summary.updatedAt)}`
       : null,
+    imageEditHistory,
     analysis,
     worldJobs,
     videoJobs,
@@ -692,7 +828,7 @@ export async function getSessionDetail(sessionId: string, userId?: string): Prom
 }
 
 export async function getReadableSessionDetail(sessionId: string, userId?: string): Promise<SessionDetail | null> {
-  if (!hasSupabaseAdminConfig()) {
+  if (!shouldUseSupabaseSessionStore()) {
     return getSessionDetail(sessionId, userId);
   }
 
@@ -712,6 +848,11 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
   const canvasImageLayers = await readJsonFile<CanvasImageLayer[]>(getCanvasImageLayersPath(sessionId), []);
   const transcript = await readJsonFile<TranscriptToken[]>(getTranscriptPath(sessionId), []);
   const analysis = await readJsonFile<SceneAnalysis | null>(getAnalysisPath(sessionId), null);
+  const imageEditHistory = hydrateImageEditHistory(
+    sessionId,
+    await readJsonFile<StoredImageEditHistoryItem[]>(getImageEditHistoryPath(sessionId), []),
+    summary.updatedAt
+  );
   const worldJobs = await listLocalWorldJobs(sessionId);
   const videoJobs = await listLocalVideoJobs(sessionId);
   const websiteJobs = await listLocalWebsiteJobs(sessionId);
@@ -759,6 +900,7 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
     editedImageUrl: editedImageExists
       ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(summary.updatedAt)}`
       : null,
+    imageEditHistory,
     analysis,
     worldJobs,
     videoJobs,
@@ -767,7 +909,7 @@ export async function getReadableSessionDetail(sessionId: string, userId?: strin
 }
 
 export async function getSessionAudio(sessionId: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return getSupabaseSessionAudio(sessionId);
   }
 
@@ -790,7 +932,7 @@ export async function getSessionAudio(sessionId: string) {
 }
 
 export async function getReadableSessionAudio(sessionId: string, userId?: string) {
-  if (!hasSupabaseAdminConfig()) {
+  if (!shouldUseSupabaseSessionStore()) {
     return getSessionAudio(sessionId);
   }
 
@@ -820,7 +962,7 @@ export async function getReadableSessionAudio(sessionId: string, userId?: string
 }
 
 export async function getSessionAnalysis(sessionId: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return getSupabaseSessionAnalysis(sessionId);
   }
 
@@ -828,7 +970,7 @@ export async function getSessionAnalysis(sessionId: string) {
 }
 
 export async function getSessionVideoSourcePlan(sessionId: string) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return getSupabaseSessionVideoSourcePlan(sessionId);
   }
 
@@ -836,7 +978,7 @@ export async function getSessionVideoSourcePlan(sessionId: string) {
 }
 
 export async function getSessionAsset(sessionId: string, assetKind: AssetKind) {
-  if (hasSupabaseAdminConfig()) {
+  if (shouldUseSupabaseSessionStore()) {
     return getSupabaseSessionAsset(sessionId, assetKind);
   }
 
@@ -854,8 +996,30 @@ export async function getSessionAsset(sessionId: string, assetKind: AssetKind) {
   }
 }
 
+export async function getSessionImageEditAsset(
+  sessionId: string,
+  editId: string,
+  assetName: "image" | "annotation"
+) {
+  if (shouldUseSupabaseSessionStore()) {
+    return getSupabaseSessionImageEditAsset(sessionId, editId, assetName);
+  }
+
+  const filePath = getImageEditAssetPath(sessionId, editId, assetName);
+
+  try {
+    return {
+      buffer: await readFile(filePath),
+      fileName: path.basename(filePath),
+      mimeType: "image/png"
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function getReadableSessionAsset(sessionId: string, assetKind: AssetKind, userId?: string) {
-  if (!hasSupabaseAdminConfig()) {
+  if (!shouldUseSupabaseSessionStore()) {
     return getSessionAsset(sessionId, assetKind);
   }
 
@@ -873,6 +1037,31 @@ export async function getReadableSessionAsset(sessionId: string, assetKind: Asse
     return {
       buffer,
       fileName: path.basename(assetPath),
+      mimeType: "image/png"
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function getReadableSessionImageEditAsset(
+  sessionId: string,
+  editId: string,
+  assetName: "image" | "annotation",
+  userId?: string
+) {
+  if (shouldUseSupabaseSessionStore() && userId) {
+    const cloudAsset = await getSupabaseSessionImageEditAsset(sessionId, editId, assetName);
+    if (cloudAsset) {
+      return cloudAsset;
+    }
+  }
+
+  const filePath = getImageEditAssetPath(sessionId, editId, assetName);
+  try {
+    return {
+      buffer: await readFile(filePath),
+      fileName: path.basename(filePath),
       mimeType: "image/png"
     };
   } catch {

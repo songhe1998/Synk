@@ -6,6 +6,8 @@ import {
   DrawingEvent,
   ImageFollowMode,
   ImageGenerationProfile,
+  ImageEditHistoryItem,
+  ImageEditAnnotation,
   ImageSizePreset,
   SceneAnalysis,
   SessionDetail,
@@ -23,8 +25,9 @@ import { isSupabaseSchemaOutdatedError, normalizeSupabaseError } from "@/lib/sup
 
 const DEFAULT_ANALYSIS_REASONING_EFFORT: AnalysisReasoningEffort = "medium";
 const DEFAULT_IMAGE_SIZE_PRESET: ImageSizePreset = "medium";
-const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "fast";
+const DEFAULT_IMAGE_GENERATION_PROFILE: ImageGenerationProfile = "pro";
 const DEFAULT_IMAGE_FOLLOW_MODE: ImageFollowMode = "auto";
+const IMAGE_EDIT_HISTORY_KIND = "imageEditHistory";
 
 interface UploadPayload {
   audioBuffer: Buffer;
@@ -79,6 +82,23 @@ interface SessionAssetRow {
   mime_type: string | null;
 }
 
+type StoredImageEditHistoryItem = Omit<ImageEditHistoryItem, "imageUrl" | "annotatedImageUrl"> & {
+  imageFileName: string;
+  annotatedImageFileName: string;
+};
+
+export interface SaveSupabaseImageEditHistoryItemInput {
+  sessionId: string;
+  sourceAssetKind: AssetKind;
+  transcriptText: string;
+  targetDescription: string;
+  requestedChange: string;
+  editPrompt: string;
+  editedImage: Buffer;
+  annotatedImage: Buffer;
+  annotation?: ImageEditAnnotation | null;
+}
+
 function normalizeSummary(row: SessionRecordRow): SessionSummary {
   return {
     id: row.id,
@@ -117,6 +137,35 @@ function normalizeSummary(row: SessionRecordRow): SessionSummary {
 
 function assetUrl(sessionId: string, assetKind: AssetKind) {
   return `/api/sessions/${sessionId}/assets/${assetKind}`;
+}
+
+function imageEditAssetUrl(sessionId: string, editId: string, assetName: "image" | "annotation", version?: string) {
+  const suffix = version ? `?v=${encodeURIComponent(version)}` : "";
+  return `/api/sessions/${sessionId}/image-edits/${editId}/${assetName}${suffix}`;
+}
+
+function imageEditAssetKind(editId: string, assetName: "image" | "annotation") {
+  return `imageEdit:${editId}:${assetName}`;
+}
+
+function hydrateImageEditHistory(
+  sessionId: string,
+  items: StoredImageEditHistoryItem[],
+  version?: string
+): ImageEditHistoryItem[] {
+  return items.map((item) => ({
+    id: item.id,
+    revisionNumber: item.revisionNumber,
+    createdAt: item.createdAt,
+    sourceAssetKind: item.sourceAssetKind,
+    transcriptText: item.transcriptText,
+    targetDescription: item.targetDescription,
+    requestedChange: item.requestedChange,
+    editPrompt: item.editPrompt,
+    annotation: item.annotation ?? null,
+    imageUrl: imageEditAssetUrl(sessionId, item.id, "image", version),
+    annotatedImageUrl: imageEditAssetUrl(sessionId, item.id, "annotation", version)
+  }));
 }
 
 function inferAudioExtension(mimeType: string) {
@@ -373,6 +422,29 @@ async function getPreferredResultUrl(sessionId: string) {
     ["generatedImage", "generatedImageLabeled", "generatedImagePlain"].includes(asset.kind)
   );
   return hasGeneratedImage ? `/sessions/${sessionId}/image` : `/sessions/${sessionId}`;
+}
+
+async function readSupabaseImageEditHistory(sessionId: string): Promise<StoredImageEditHistoryItem[]> {
+  const asset = await getAssetRow(sessionId, IMAGE_EDIT_HISTORY_KIND);
+  if (!asset) {
+    return [];
+  }
+
+  const stored = await readSessionBinaryAsset(
+    asset.storage_path,
+    asset.file_name,
+    asset.mime_type ?? "application/json"
+  );
+  if (!stored) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stored.buffer.toString("utf8")) as StoredImageEditHistoryItem[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function createSupabaseSession(
@@ -664,6 +736,79 @@ export async function saveSupabaseSessionAsset(sessionId: string, assetKind: Ass
   });
 }
 
+export async function saveSupabaseSessionImageEditHistoryItem({
+  sessionId,
+  sourceAssetKind,
+  transcriptText,
+  targetDescription,
+  requestedChange,
+  editPrompt,
+  editedImage,
+  annotatedImage,
+  annotation
+}: SaveSupabaseImageEditHistoryItemInput) {
+  const current = await getSessionRow(sessionId);
+  if (!current) {
+    throw new Error("Session not found");
+  }
+
+  const history = await readSupabaseImageEditHistory(sessionId);
+  const revisionNumber = history.reduce((max, item) => Math.max(max, item.revisionNumber), 0) + 1;
+  const editId = `edit-${String(revisionNumber).padStart(3, "0")}`;
+  const imageFileName = `image-edits/${editId}.png`;
+  const annotatedImageFileName = `image-edits/${editId}-annotation.png`;
+  const createdAt = new Date().toISOString();
+
+  await Promise.all([
+    uploadSessionBinaryAsset({
+      userId: current.user_id,
+      sessionId,
+      kind: imageEditAssetKind(editId, "image"),
+      fileName: imageFileName,
+      mimeType: "image/png",
+      buffer: editedImage
+    }),
+    uploadSessionBinaryAsset({
+      userId: current.user_id,
+      sessionId,
+      kind: imageEditAssetKind(editId, "annotation"),
+      fileName: annotatedImageFileName,
+      mimeType: "image/png",
+      buffer: annotatedImage
+    })
+  ]);
+
+  const nextHistory: StoredImageEditHistoryItem[] = [
+    ...history,
+    {
+      id: editId,
+      revisionNumber,
+      createdAt,
+      sourceAssetKind,
+      transcriptText,
+      targetDescription,
+      requestedChange,
+      editPrompt,
+      annotation: annotation ?? null,
+      imageFileName,
+      annotatedImageFileName
+    }
+  ];
+
+  await uploadSessionBinaryAsset({
+    userId: current.user_id,
+    sessionId,
+    kind: IMAGE_EDIT_HISTORY_KIND,
+    fileName: "image-edit-history.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify(nextHistory, null, 2), "utf8")
+  });
+
+  return updateSessionRow(sessionId, {
+    error_message: null
+  });
+}
+
 export async function markSupabaseSessionFailed(sessionId: string, error: string) {
   const current = await getSessionRow(sessionId);
   if (!current) {
@@ -684,6 +829,11 @@ export async function getSupabaseSessionDetail(sessionId: string, userId?: strin
 
   const payload = await getPayloadRow(sessionId);
   const assets = await listAssetRows(sessionId);
+  const imageEditHistory = hydrateImageEditHistory(
+    sessionId,
+    await readSupabaseImageEditHistory(sessionId),
+    row.updated_at
+  );
   const worldJobs = await listWorldJobs(sessionId);
   const videoJobs = await listVideoJobs(sessionId);
   const websiteJobs = await listWebsiteJobs(sessionId);
@@ -707,6 +857,7 @@ export async function getSupabaseSessionDetail(sessionId: string, userId?: strin
     editedImageUrl: getAssetUrl("editedImage")
       ? `/api/sessions/${sessionId}/assets/editedImage?v=${encodeURIComponent(row.updated_at)}`
       : null,
+    imageEditHistory,
     analysis: payload?.analysis ?? null,
     worldJobs,
     videoJobs,
@@ -735,6 +886,19 @@ export async function getSupabaseSessionVideoSourcePlan(sessionId: string) {
 
 export async function getSupabaseSessionAsset(sessionId: string, assetKind: AssetKind) {
   const asset = await getAssetRow(sessionId, assetKind);
+  if (!asset) {
+    return null;
+  }
+
+  return readSessionBinaryAsset(asset.storage_path, asset.file_name, asset.mime_type ?? "image/png");
+}
+
+export async function getSupabaseSessionImageEditAsset(
+  sessionId: string,
+  editId: string,
+  assetName: "image" | "annotation"
+) {
+  const asset = await getAssetRow(sessionId, imageEditAssetKind(editId, assetName));
   if (!asset) {
     return null;
   }

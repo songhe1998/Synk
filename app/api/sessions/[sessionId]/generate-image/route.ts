@@ -54,6 +54,7 @@ export async function POST(
       imageSizePreset: parseImageSizePreset(body?.imageSizePreset),
       imageGenerationProfile: parseImageGenerationProfile(body?.imageGenerationProfile),
       imageFollowMode: parseImageFollowMode(body?.imageFollowMode),
+      forceAnalysis: body?.forceAnalysis === true,
       force: true
     });
     return NextResponse.json(updatedSession);

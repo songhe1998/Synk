@@ -1,7 +1,7 @@
 import type { Route } from "next";
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
-import { hasSupabaseAdminConfig } from "@/lib/supabase/config";
+import { hasSupabaseAdminConfig, isDemoModeEnabled } from "@/lib/supabase/config";
 
 export interface Viewer {
   id: string;
@@ -13,7 +13,7 @@ function buildSignInHref(nextPath: string) {
 }
 
 export function isAuthEnabled() {
-  return hasSupabaseAdminConfig();
+  return hasSupabaseAdminConfig() && !isDemoModeEnabled();
 }
 
 export async function getOptionalViewer(): Promise<Viewer | null> {

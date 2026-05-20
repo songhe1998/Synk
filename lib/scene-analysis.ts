@@ -16,6 +16,7 @@ import {
   SceneAnalysis,
   Stroke,
   StrokeCluster,
+  TranscriptEvidenceMatch,
   TranscriptToken
 } from "@/lib/types";
 
@@ -30,6 +31,13 @@ const RESPONSES_URL = "https://api.openai.com/v1/responses";
 const RESPONSES_TIMEOUT_MS = Number(process.env.OPENAI_RESPONSES_TIMEOUT_MS ?? 120000);
 const SKETCH_BACKGROUND = "#fff8e6";
 const RESPONSES_MAX_ATTEMPTS = 3;
+const SKETCH_LABEL_FONT_SIZE = 3.5;
+const SKETCH_LABEL_HORIZONTAL_PADDING = 2.5;
+const SKETCH_LABEL_HEIGHT = 7;
+const SKETCH_LABEL_ASCII_CHAR_WIDTH = 1.9;
+const SKETCH_LABEL_WIDE_CHAR_WIDTH = 3.25;
+const SKETCH_LABEL_MARGIN = 2;
+const SKETCH_LABEL_STROKE_WIDTH = 0.4;
 
 interface ExtractedSceneObject {
   tag: string;
@@ -48,6 +56,12 @@ interface ImageEditPromptPayload {
   target_description: string;
   requested_change: string;
   edit_prompt: string;
+}
+
+interface ImageEditOperationPayload {
+  operations: Array<{
+    operation: string;
+  }>;
 }
 
 interface InternalStrokeMetrics {
@@ -71,8 +85,6 @@ interface InternalCluster {
 interface LabelLayout {
   objectId: string;
   box: BoundingBox;
-  leaderStart: Point2D;
-  leaderEnd: Point2D;
 }
 
 interface LabelAnchorSelection {
@@ -86,6 +98,13 @@ interface GroundingSeedObject {
   label: string;
   description?: string;
   evidence_quotes: string[];
+}
+
+interface GroundedLayoutObject {
+  tag: string;
+  label: string;
+  bbox: BoundingBox;
+  centroid: Point2D;
 }
 
 function escapeXml(value: string) {
@@ -305,7 +324,12 @@ function buildImageSourceInstruction(
             "Keep geometric, symbolic, diagrammatic, interface-like, and map-like elements tightly aligned to the sketch."
           ].join(" ")
         : [
-            "Preserve the subject's overall footprint in the frame, approximate placement, relative scale, overlap, depth ordering, and framing, but do not trace literal contours unless they are clearly intentional final shapes.",
+            "Treat the sketch as a spatial layout map. The relative position relationships are hard constraints and must be followed.",
+            "Use judgment for shape adherence: copy a stroke's literal shape only when the shape itself appears intentional or semantically important; otherwise transform rough strokes into natural final forms.",
+            "Preserve which objects are left, right, above, below, centered, near, far, separated, overlapping, in front, behind, across from each other, or on opposite sides of paths/rivers/roads.",
+            "Preserve approximate object centers, bounding boxes, relative scale, spacing, depth ordering, framing, and the overall route or direction of major paths, rivers, roads, arrows, and dividers.",
+            "Do not relocate objects into a more conventional composition if that contradicts the sketch layout, even when the transcript describes a familiar scene.",
+            "For natural objects, do not trace literal contours unless they are clearly intentional final shapes.",
             "If a rough circle, oval, rectangle, arrow, or blob appears to be placeholder blocking for an intended object, render the intended object naturally rather than preserving primitive geometry.",
             "Only follow the sketch shape strictly when the scene is clearly geometric, symbolic, diagrammatic, logo-like, interface-like, map-like, or when the transcript explicitly asks for precise shapes."
           ].join(" ");
@@ -404,10 +428,11 @@ Rules:
 - If the user corrects themselves, use the last clear correction as final.
 - Keep object descriptions natural and concise.
 - Keep object tags short enough to draw on the sketch. Use spatial disambiguation only when needed, for example "left apple".
-- Put background, style, relationships, and story/mood into global_info.
+- Put background, style, relationships, and story/mood into global_info. In relationships, explicitly name the relative layout between extracted objects whenever the transcript provides or strongly implies it, using concrete terms such as left of, right of, above, below, in front of, behind, near, far, across from, and on the opposite side of.
 - Infer the intended visual style from the transcript itself. Use explicit style requests when they exist, and otherwise infer a fitting finished-image style from the user's wording, mood, subject matter, and descriptive cues.
 - If the transcript does not provide meaningful style cues, keep the style natural and neutral rather than forcing a named style.
 - Write generation_prompt as a natural paragraph for a finished image that describes the intended visible scene, composition, relationships, atmosphere, and framing.
+- The generation_prompt must make the relative position of every extracted object clear. Avoid vague "include X" phrasing when there are multiple objects; say where each object sits relative to the others, for example "the moon above the skyline", "the mall across the river from the buildings", or "the river between the buildings and the mall".
 - Do not mention sketch lines, labels, callouts, or placeholder geometry in generation_prompt unless they are truly meant to appear in the final image.
 - If spoken geometry is only a placeholder for a semantic object, describe the semantic object instead of the placeholder shape.
 - The prompt should describe the intended final image style, whether explicitly requested or reasonably inferred from the transcript.
@@ -539,12 +564,42 @@ function selectClusterIdsForObject(
     }
 
     const overlapArea = bboxIntersectionArea(cluster.bbox, primaryCluster.bbox);
-    const closeInSpace = distance(cluster.centroid, primaryCluster.centroid) <= Math.max(260, primaryDiagonal * 1.15);
+    const closeInSpace = distance(cluster.centroid, primaryCluster.centroid) <= Math.max(90, primaryDiagonal * 1.15);
     const closeInTime = cluster.startMs >= primaryCluster.startMs - 1000 && cluster.endMs <= upperTimeBound;
     return closeInTime && (overlapArea > 0 || closeInSpace);
   });
 
   return [primaryCluster.id, ...additionalClusters.map((cluster) => cluster.id)];
+}
+
+function chooseGroundingEvidenceMatch(evidenceMatches: TranscriptEvidenceMatch[]) {
+  const validEvidence = evidenceMatches.filter(
+    (
+      match
+    ): match is TranscriptEvidenceMatch & {
+      startMs: number;
+      endMs: number;
+      startTokenIndex: number;
+      endTokenIndex: number;
+    } =>
+      match.startMs !== null &&
+      match.endMs !== null &&
+      match.startTokenIndex !== null &&
+      match.endTokenIndex !== null
+  );
+
+  if (validEvidence.length === 0) {
+    return null;
+  }
+
+  return validEvidence.toSorted((left, right) => {
+    const startDelta = left.startMs - right.startMs;
+    if (startDelta !== 0) {
+      return startDelta;
+    }
+
+    return left.endMs - left.startMs - (right.endMs - right.startMs);
+  })[0];
 }
 
 function selectLabelAnchorFromEvidence(
@@ -605,16 +660,235 @@ function selectLabelAnchorFromEvidence(
   };
 }
 
+function formatObjectName(object: Pick<GroundedSceneObject, "label" | "tag">) {
+  return (object.label || object.tag).trim();
+}
+
+function formatHorizontalPosition(x: number, width: number) {
+  const ratio = width > 0 ? x / width : 0.5;
+  if (ratio < 0.18) {
+    return "far left";
+  }
+  if (ratio < 0.38) {
+    return "left";
+  }
+  if (ratio > 0.82) {
+    return "far right";
+  }
+  if (ratio > 0.62) {
+    return "right";
+  }
+  return "center";
+}
+
+function formatVerticalPosition(y: number, height: number) {
+  const ratio = height > 0 ? y / height : 0.5;
+  if (ratio < 0.18) {
+    return "top";
+  }
+  if (ratio < 0.38) {
+    return "upper";
+  }
+  if (ratio > 0.82) {
+    return "bottom";
+  }
+  if (ratio > 0.62) {
+    return "lower";
+  }
+  return "middle";
+}
+
+function isPathLikeObjectName(name: string) {
+  return /\b(river|road|path|route|street|line|divider|bridge|canal|stream|trail|riverbank)\b/iu.test(name);
+}
+
+function formatCompoundPosition(vertical: string, horizontal: string) {
+  const normalizedHorizontal =
+    horizontal === "far left" ? "left" : horizontal === "far right" ? "right" : horizontal;
+  if (vertical === "top") {
+    return `top-${normalizedHorizontal} corner`;
+  }
+  if (vertical === "bottom") {
+    return `bottom-${normalizedHorizontal} corner`;
+  }
+
+  return `${vertical}-${normalizedHorizontal}`;
+}
+
+function describeFramePlacement(
+  object: Pick<GroundedLayoutObject, "label" | "tag" | "bbox" | "centroid">,
+  canvasWidth: number,
+  canvasHeight: number
+) {
+  const name = formatObjectName(object);
+  if (!name) {
+    return null;
+  }
+
+  const horizontal = formatHorizontalPosition(object.centroid.x, canvasWidth);
+  const vertical = formatVerticalPosition(object.centroid.y, canvasHeight);
+  const widthRatio = canvasWidth > 0 ? object.bbox.width / canvasWidth : 0;
+  const heightRatio = canvasHeight > 0 ? object.bbox.height / canvasHeight : 0;
+  const pathLike = isPathLikeObjectName(name);
+
+  if (pathLike && heightRatio >= 0.45 && widthRatio < 0.45) {
+    return `${name} running from the upper ${horizontal} toward the lower ${horizontal}`;
+  }
+
+  if (pathLike && widthRatio >= 0.45 && heightRatio < 0.45) {
+    return `${name} running across the ${vertical} ${horizontal}`;
+  }
+
+  if (vertical === "middle" && horizontal === "center") {
+    return `${name} in the center`;
+  }
+
+  if (vertical === "middle") {
+    return `${name} on the ${horizontal} side`;
+  }
+
+  if (horizontal === "center") {
+    return `${name} in the ${vertical} center`;
+  }
+
+  return `${name} in the ${formatCompoundPosition(vertical, horizontal)}`;
+}
+
+function describePairRelationship(
+  left: Pick<GroundedLayoutObject, "label" | "tag" | "centroid">,
+  right: Pick<GroundedLayoutObject, "label" | "tag" | "centroid">,
+  canvasWidth: number,
+  canvasHeight: number
+) {
+  const leftName = formatObjectName(left);
+  const rightName = formatObjectName(right);
+  if (!leftName || !rightName) {
+    return null;
+  }
+
+  const dx = (left.centroid.x - right.centroid.x) / Math.max(1, canvasWidth);
+  const dy = (left.centroid.y - right.centroid.y) / Math.max(1, canvasHeight);
+  const horizontal = Math.abs(dx) >= 0.16 ? (dx < 0 ? "left of" : "right of") : "";
+  const vertical = Math.abs(dy) >= 0.16 ? (dy < 0 ? "above" : "below") : "";
+
+  if (horizontal && vertical) {
+    return `${leftName} ${vertical} and ${horizontal} ${rightName}`;
+  }
+
+  if (horizontal) {
+    return `${leftName} ${horizontal} ${rightName}`;
+  }
+
+  if (vertical) {
+    return `${leftName} ${vertical} ${rightName}`;
+  }
+
+  return null;
+}
+
+function joinNaturalList(items: string[]) {
+  if (items.length <= 2) {
+    return items.join(" and ");
+  }
+
+  return `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
+}
+
+function getGroundedLayoutObject(object: GroundedSceneObject): GroundedLayoutObject | null {
+  const bbox = object.labelAnchorBbox ?? object.bbox;
+  const centroid = object.labelAnchorPoint ?? object.centroid;
+  const label = formatObjectName(object);
+
+  if (!bbox || !centroid || !label) {
+    return null;
+  }
+
+  return {
+    tag: object.tag,
+    label: object.label,
+    bbox,
+    centroid
+  };
+}
+
+function buildGroundedLayoutPrompt(
+  objects: GroundedSceneObject[],
+  canvasWidth?: number,
+  canvasHeight?: number
+) {
+  const groundedObjects = objects
+    .map(getGroundedLayoutObject)
+    .filter((object): object is GroundedLayoutObject => Boolean(object));
+
+  if (groundedObjects.length < 2) {
+    return "";
+  }
+
+  const inferredWidth = Math.max(
+    1,
+    canvasWidth ?? Math.max(...groundedObjects.map((object) => object.bbox.x + object.bbox.width))
+  );
+  const inferredHeight = Math.max(
+    1,
+    canvasHeight ?? Math.max(...groundedObjects.map((object) => object.bbox.y + object.bbox.height))
+  );
+  const placements = groundedObjects
+    .map((object) => describeFramePlacement(object, inferredWidth, inferredHeight))
+    .filter((value): value is string => Boolean(value));
+  const relationships: string[] = [];
+
+  for (let leftIndex = 0; leftIndex < groundedObjects.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < groundedObjects.length; rightIndex += 1) {
+      const relationship = describePairRelationship(
+        groundedObjects[leftIndex],
+        groundedObjects[rightIndex],
+        inferredWidth,
+        inferredHeight
+      );
+      if (relationship) {
+        relationships.push(relationship);
+      }
+    }
+  }
+
+  const parts = [`Follow this grounded sketch layout: place ${joinNaturalList(placements)}.`];
+  const limitedRelationships = relationships.slice(0, 8);
+  if (limitedRelationships.length > 0) {
+    parts.push(`Keep ${joinNaturalList(limitedRelationships)}.`);
+  }
+
+  return parts.join(" ");
+}
+
+function appendGroundedLayoutToPrompt(
+  prompt: string,
+  objects: GroundedSceneObject[],
+  canvasWidth?: number,
+  canvasHeight?: number
+) {
+  const trimmedPrompt = prompt.trim();
+  const layoutPrompt = buildGroundedLayoutPrompt(objects, canvasWidth, canvasHeight);
+  if (!layoutPrompt) {
+    return trimmedPrompt;
+  }
+
+  return `${trimmedPrompt.replace(/\s+$/u, "").replace(/[.。]*$/u, "")}. ${layoutPrompt}`;
+}
+
 export function groundSceneExtraction({
   transcript,
   events,
   extractionModel,
-  extraction
+  extraction,
+  canvasWidth,
+  canvasHeight
 }: {
   transcript: TranscriptToken[];
   events: DrawingEvent[];
   extractionModel: string;
   extraction: SceneExtractionPayload;
+  canvasWidth?: number;
+  canvasHeight?: number;
 }): SceneAnalysis {
   const clusters = buildStrokeClusters(events);
   const objects = groundObjectsFromTranscriptAndEvents({
@@ -629,7 +903,12 @@ export function groundSceneExtraction({
     transcriptText: buildDisplayTranscript(transcript),
     objects,
     globalInfo: extraction.global_info,
-    generationPrompt: extraction.generation_prompt.trim(),
+    generationPrompt: appendGroundedLayoutToPrompt(
+      extraction.generation_prompt,
+      objects,
+      canvasWidth,
+      canvasHeight
+    ),
     notes: [
       `Scene understanding generated with ${extractionModel}.`,
       `Objects grounded against ${clusters.length} stroke clusters.`
@@ -651,11 +930,9 @@ export function groundObjectsFromTranscriptAndEvents({
 
   return objects.map((object, index) => {
     const evidenceMatches = object.evidence_quotes.map((quote) => matchEvidenceQuote(transcript, quote));
-    const validEvidence = evidenceMatches.filter(
-      (match) => match.startMs !== null && match.endMs !== null
-    );
-    const anchorStart = validEvidence.length > 0 ? Math.min(...validEvidence.map((match) => match.startMs ?? Infinity)) : null;
-    const anchorEnd = validEvidence.length > 0 ? Math.max(...validEvidence.map((match) => match.endMs ?? 0)) : null;
+    const groundingEvidence = chooseGroundingEvidenceMatch(evidenceMatches);
+    const anchorStart = groundingEvidence?.startMs ?? null;
+    const anchorEnd = groundingEvidence?.endMs ?? null;
     const primaryCluster = choosePrimaryCluster(clusters, anchorStart, anchorEnd);
     const clusterIds = selectClusterIdsForObject(clusters, primaryCluster, anchorEnd);
     const matchedClusters = clusters.filter((cluster) => clusterIds.includes(cluster.id));
@@ -686,10 +963,14 @@ function getObjectLabelText(object: Pick<GroundedSceneObject, "label" | "tag">) 
 
 function estimateTagDimensions(tag: string) {
   const width =
-    Array.from(tag).reduce((sum, char) => sum + (/[\u0000-\u00ff]/u.test(char) ? 8 : 14), 0) + 24;
+    Array.from(tag).reduce(
+      (sum, char) => sum + (/[\u0000-\u00ff]/u.test(char) ? SKETCH_LABEL_ASCII_CHAR_WIDTH : SKETCH_LABEL_WIDE_CHAR_WIDTH),
+      0
+    ) +
+    SKETCH_LABEL_HORIZONTAL_PADDING * 2;
   return {
-    width,
-    height: 32
+    width: Math.max(6, width),
+    height: SKETCH_LABEL_HEIGHT
   };
 }
 
@@ -697,63 +978,30 @@ function layoutLabels(objects: GroundedSceneObject[], canvasWidth: number, canva
   const placed: LabelLayout[] = [];
 
   objects.forEach((object) => {
-    const targetBbox = object.labelAnchorBbox ?? object.bbox;
     const targetPoint = object.labelAnchorPoint ?? object.centroid;
 
-    if (!targetBbox || !targetPoint) {
+    if (!targetPoint) {
       return;
     }
 
     const labelText = getObjectLabelText(object);
     const { width, height } = estimateTagDimensions(labelText);
-    const bbox = targetBbox;
     const center = targetPoint;
-    const candidates: BoundingBox[] = [
-      { x: center.x - width / 2, y: bbox.y - height - 18, width, height },
-      { x: bbox.x + bbox.width + 18, y: center.y - height / 2, width, height },
-      { x: bbox.x - width - 18, y: center.y - height / 2, width, height },
-      { x: center.x - width / 2, y: bbox.y + bbox.height + 18, width, height }
-    ];
-
-    let bestCandidate = candidates[0];
-    let bestPenalty = Number.POSITIVE_INFINITY;
-
-    candidates.forEach((candidate) => {
-      const clampedCandidate = {
-        ...candidate,
-        x: clamp(candidate.x, 8, Math.max(8, canvasWidth - candidate.width - 8)),
-        y: clamp(candidate.y, 8, Math.max(8, canvasHeight - candidate.height - 8))
-      };
-
-      const outOfBoundsPenalty =
-        Math.abs(clampedCandidate.x - candidate.x) + Math.abs(clampedCandidate.y - candidate.y);
-      const overlapWithObject = bboxIntersectionArea(clampedCandidate, bbox);
-      const overlapWithLabels = placed.reduce(
-        (sum, item) => sum + bboxIntersectionArea(clampedCandidate, item.box),
-        0
-      );
-      const distancePenalty = distance(
-        bboxCenter(clampedCandidate),
-        center
-      );
-
-      const penalty =
-        outOfBoundsPenalty * 8 +
-        overlapWithObject * 0.05 +
-        overlapWithLabels * 0.25 +
-        distancePenalty * 0.2;
-
-      if (penalty < bestPenalty) {
-        bestPenalty = penalty;
-        bestCandidate = clampedCandidate;
-      }
-    });
+    const directBox = {
+      x: center.x - width / 2,
+      y: center.y - height / 2,
+      width,
+      height
+    };
+    const clampedBox = {
+      ...directBox,
+      x: clamp(directBox.x, SKETCH_LABEL_MARGIN, Math.max(SKETCH_LABEL_MARGIN, canvasWidth - directBox.width - SKETCH_LABEL_MARGIN)),
+      y: clamp(directBox.y, SKETCH_LABEL_MARGIN, Math.max(SKETCH_LABEL_MARGIN, canvasHeight - directBox.height - SKETCH_LABEL_MARGIN))
+    };
 
     placed.push({
       objectId: object.id,
-      box: bestCandidate,
-      leaderStart: bboxCenter(bestCandidate),
-      leaderEnd: center
+      box: clampedBox
     });
   });
 
@@ -838,10 +1086,8 @@ export async function renderGroundedSketchPng({
           }
           const labelText = getObjectLabelText(object);
           return `
-            <line x1="${layout.leaderStart.x}" y1="${layout.leaderStart.y}" x2="${layout.leaderEnd.x}" y2="${layout.leaderEnd.y}" stroke="#2f6a52" stroke-width="2" stroke-linecap="round" />
-            <circle cx="${layout.leaderEnd.x}" cy="${layout.leaderEnd.y}" r="4" fill="#2f6a52" />
-            <rect x="${layout.box.x}" y="${layout.box.y}" rx="14" ry="14" width="${layout.box.width}" height="${layout.box.height}" fill="rgba(255,255,255,0.92)" stroke="#2f6a52" stroke-width="2" />
-            <text x="${layout.box.x + layout.box.width / 2}" y="${layout.box.y + 21}" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" font-weight="700" fill="#1f1f26">${escapeXml(labelText)}</text>
+            <rect x="${layout.box.x}" y="${layout.box.y}" rx="2" ry="2" width="${layout.box.width}" height="${layout.box.height}" fill="rgba(255,255,255,0.88)" stroke="#2f6a52" stroke-width="${SKETCH_LABEL_STROKE_WIDTH}" />
+            <text x="${layout.box.x + layout.box.width / 2}" y="${layout.box.y + 4.9}" text-anchor="middle" font-family="Arial, sans-serif" font-size="${SKETCH_LABEL_FONT_SIZE}" font-weight="700" fill="#1f1f26">${escapeXml(labelText)}</text>
           `.trim();
         })
         .join("")}
@@ -973,6 +1219,56 @@ export async function generateImageFromSketch({
   };
 }
 
+function markerColorName(color: string | null | undefined) {
+  switch (color?.toLowerCase()) {
+    case "#ff3b30":
+    case "#d4423a":
+    case "#ef4444":
+      return "red";
+    case "#007aff":
+    case "#0a84ff":
+    case "#2367d1":
+    case "#3b82f6":
+      return "blue";
+    case "#34c759":
+    case "#2f7d57":
+    case "#22c55e":
+      return "green";
+    case "#ffcc00":
+    case "#f59e0b":
+      return "yellow";
+    case "#af52de":
+    case "#8b5cf6":
+      return "purple";
+    case "#ff9500":
+    case "#f97316":
+      return "orange";
+    case "#ffffff":
+      return "white";
+    case "#000000":
+      return "black";
+    default:
+      return color ?? "unknown";
+  }
+}
+
+function sortedAnnotationStrokes(annotation: ImageEditAnnotation) {
+  return annotation.strokes
+    .map((stroke, index) => ({
+      stroke,
+      index,
+      startMs: stroke.startMs ?? stroke.points[0]?.tMs ?? Number.POSITIVE_INFINITY
+    }))
+    .toSorted((left, right) => {
+      const timeDelta = left.startMs - right.startMs;
+      if (timeDelta !== 0) {
+        return timeDelta;
+      }
+      return left.index - right.index;
+    })
+    .map((item) => item.stroke);
+}
+
 function formatImageEditAnnotation(annotation: ImageEditAnnotation) {
   const normalizedBbox = {
     x: annotation.viewportWidth ? annotation.bbox.x / annotation.viewportWidth : 0,
@@ -981,11 +1277,23 @@ function formatImageEditAnnotation(annotation: ImageEditAnnotation) {
     height: annotation.viewportHeight ? annotation.bbox.height / annotation.viewportHeight : 0
   };
 
-  const strokes = annotation.strokes.map((stroke, index) => ({
+  const strokes = sortedAnnotationStrokes(annotation).map((stroke, index) => ({
     id: stroke.id || `stroke-${index + 1}`,
+    color: stroke.color ?? null,
+    colorName: markerColorName(stroke.color),
     startMs: stroke.startMs ?? stroke.points[0]?.tMs ?? null,
     endMs: stroke.endMs ?? stroke.points.at(-1)?.tMs ?? null,
-    pointCount: stroke.points.length
+    pointCount: stroke.points.length,
+    bbox: bboxFromPoints(stroke.points),
+    normalizedBbox: (() => {
+      const bbox = bboxFromPoints(stroke.points);
+      return {
+        x: annotation.viewportWidth ? bbox.x / annotation.viewportWidth : 0,
+        y: annotation.viewportHeight ? bbox.y / annotation.viewportHeight : 0,
+        width: annotation.viewportWidth ? bbox.width / annotation.viewportWidth : 0,
+        height: annotation.viewportHeight ? bbox.height / annotation.viewportHeight : 0
+      };
+    })()
   }));
 
   return JSON.stringify(
@@ -1039,32 +1347,70 @@ function formatSceneObjectsForEdit(analysis: SceneAnalysis | null | undefined) {
 }
 
 const IMAGE_EDIT_PROMPT_INSTRUCTIONS = `
-You write precise edit prompts for an image editing model.
+You extract edit operations from a spoken image edit request.
 
 Inputs:
-- The current generated image.
-- The same image with the user's red sketch marks over it.
 - The user's spoken edit request.
 - Optional timing metadata for the spoken words and drawn strokes.
-- Optional prior scene analysis from the original sketch-to-image generation.
 
 Rules:
-- Treat the red sketch marks only as targeting guidance. They must not appear in the output.
-- Resolve vague words like this, that, here, and this part by matching the sketch mark location and timing to the spoken request.
-- Identify the target by visible content and approximate location in the image, for example "the small lantern in the upper-right corner" or "the character's left hand near the center".
-- The edit_prompt must say exactly what to change and where, and must also say to preserve the rest of the image unchanged.
-- Do not ask the model to add labels, red marks, outlines, arrows, circles, or callouts.
-- If the request is ambiguous, choose the most likely marked target and make the prompt concrete.
+- Output only the requested edit operation or operations.
+- Do not resolve which stroke, marker color, or image object the operation applies to. The application will do that by matching operations to colored strokes.
+- If there is one requested edit, return one operation.
+- If there are multiple requested edits, return them in the same order the user said them.
+- Each operation should be an imperative phrase that can be applied to a circled target, for example "make the circled object larger", "change the circled flower to blue", or "remove the circled leaf".
+- Do not include marker colors unless the user explicitly says a color is the desired new object color.
 - Return JSON only.
 `.trim();
 
+const IMAGE_EDIT_PROMPT_PREFIX = `
+Edit the marked input image according to this marker-color-to-operation JSON.
+
+The input image contains visible colored marker strokes. Each JSON key is a marker color. For each entry, find the object or region circled by the marker stroke of that color and apply exactly the operation in the value. Marker strokes are only targeting guides; they are not part of the original image and must not appear in the output.
+`.trim();
+
+const IMAGE_EDIT_PRESERVATION_SUFFIX = `
+This is an image editing task, not a new image generation task. Preserve the original image exactly. The only allowed change is the user-specified edit to the explicitly referenced target object/region. All non-target areas must remain unchanged and visually identical to the input image. Do not alter any nearby objects, overlapping objects, background, lighting, shadows, perspective, framing, pose, or image style. Do not make creative improvements or global adjustments. Apply the minimum necessary edit and keep all untouched regions the same as the original.
+`.trim();
+
+function buildColorOperationMap(
+  annotation: ImageEditAnnotation,
+  operationPayload: ImageEditOperationPayload,
+  transcriptText: string
+) {
+  const operations = operationPayload.operations
+    .map((item) => item.operation.trim())
+    .filter(Boolean);
+  const fallbackOperation = operations[0] ?? transcriptText.trim();
+  const mapping: Record<string, string> = {};
+
+  sortedAnnotationStrokes(annotation).forEach((stroke, index) => {
+    const colorName = markerColorName(stroke.color);
+    const operation = operations[index] ?? fallbackOperation;
+    if (!operation) {
+      return;
+    }
+    mapping[colorName] = operation;
+  });
+
+  return mapping;
+}
+
+function buildColorOperationEditPrompt(colorOperationMap: Record<string, string>) {
+  return [
+    IMAGE_EDIT_PROMPT_PREFIX,
+    "",
+    "Marker-color-to-operation JSON:",
+    JSON.stringify(colorOperationMap, null, 2),
+    "",
+    IMAGE_EDIT_PRESERVATION_SUFFIX
+  ].join("\n");
+}
+
 export async function writeImageEditPrompt({
-  currentImage,
-  annotatedImage,
   transcriptText,
   transcriptTokens,
   annotation,
-  analysis,
   apiKey,
   profile = "pro"
 }: {
@@ -1099,26 +1445,12 @@ export async function writeImageEditPrompt({
                 "Spoken edit request:",
                 transcriptText.trim() || "(empty)",
                 "",
-                "Prior final image prompt:",
-                analysis?.generationPrompt?.trim() || "(not available)",
-                "",
-                "Prior scene objects:",
-                formatSceneObjectsForEdit(analysis),
-                "",
                 "Sketch mark geometry:",
                 formatImageEditAnnotation(annotation),
                 "",
                 "Timed spoken tokens:",
                 formatEditTranscriptTokens(transcriptTokens)
               ].join("\n")
-            },
-            {
-              type: "input_image",
-              image_url: imageBufferToDataUrl(currentImage)
-            },
-            {
-              type: "input_image",
-              image_url: imageBufferToDataUrl(annotatedImage)
             }
           ]
         }
@@ -1131,11 +1463,19 @@ export async function writeImageEditPrompt({
           schema: {
             type: "object",
             properties: {
-              target_description: { type: "string" },
-              requested_change: { type: "string" },
-              edit_prompt: { type: "string" }
+              operations: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    operation: { type: "string" }
+                  },
+                  required: ["operation"],
+                  additionalProperties: false
+                }
+              }
             },
-            required: ["target_description", "requested_change", "edit_prompt"],
+            required: ["operations"],
             additionalProperties: false
           }
         }
@@ -1144,7 +1484,15 @@ export async function writeImageEditPrompt({
     apiKey
   );
 
-  return JSON.parse(extractOutputText(payload)) as ImageEditPromptPayload;
+  const operationPayload = JSON.parse(extractOutputText(payload)) as ImageEditOperationPayload;
+  const colorOperationMap = buildColorOperationMap(annotation, operationPayload, transcriptText);
+  const requestedChange = JSON.stringify(colorOperationMap, null, 2);
+
+  return {
+    target_description: `Colored marker targets: ${Object.keys(colorOperationMap).join(", ")}`,
+    requested_change: requestedChange,
+    edit_prompt: buildColorOperationEditPrompt(colorOperationMap)
+  } satisfies ImageEditPromptPayload;
 }
 
 export async function generateEditedImageFromImage({
@@ -1195,7 +1543,8 @@ export async function generateEditedImageFromImage({
               text: [
                 prompt.trim(),
                 "Preserve all unmentioned people, objects, layout, composition, lighting, camera angle, and style unchanged.",
-                "Do not include red sketch marks, labels, arrows, circles, outlines, guide marks, or explanatory text."
+                "Use any visible colored marker strokes only as edit targeting guides; remove/ignore them in the final output.",
+                "Do not include colored marker strokes, labels, arrows, circles, outlines, guide marks, or explanatory text."
               ].join(" ")
             },
             {
@@ -1230,6 +1579,99 @@ export async function generateEditedImageFromImage({
   const result = imageCall?.result;
   if (typeof result !== "string" || !result) {
     throw new Error("Image edit returned no image payload.");
+  }
+
+  return {
+    model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+    buffer: Buffer.from(result, "base64")
+  };
+}
+
+export async function generateReferenceRestoredImage({
+  prompt,
+  currentImage,
+  referenceImage,
+  apiKey,
+  width,
+  height,
+  imageSizePreset,
+  profile = "pro"
+}: {
+  prompt: string;
+  currentImage: Buffer;
+  referenceImage: Buffer;
+  apiKey: string;
+  width: number;
+  height: number;
+  imageSizePreset: ImageSizePreset;
+  profile?: ImageGenerationProfile;
+}) {
+  const imageToolModel = profile === "fast" ? FAST_IMAGE_TOOL_MODEL : IMAGE_TOOL_MODEL;
+  const imageToolSize =
+    profile === "fast" ? resolveFastImageSize() : resolveImageToolSize(width, height, imageSizePreset);
+  const [preparedCurrentImage, preparedReferenceImage] = await Promise.all(
+    [currentImage, referenceImage].map((image) =>
+      profile === "fast"
+        ? sharp(image).resize({ width: 1024, height: 1024, fit: "inside", withoutEnlargement: true }).png().toBuffer()
+        : sharp(image).resize({ width: 1536, height: 1536, fit: "inside", withoutEnlargement: true }).png().toBuffer()
+    )
+  );
+
+  const payload = await callResponsesApi(
+    {
+      model: profile === "fast" ? FAST_IMAGE_ORCHESTRATOR_MODEL : IMAGE_ORCHESTRATOR_MODEL,
+      ...(profile === "fast"
+        ? {
+            reasoning: {
+              effort: "low"
+            }
+          }
+        : {}),
+      store: false,
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: prompt.trim()
+            },
+            {
+              type: "input_image",
+              image_url: imageBufferToDataUrl(preparedCurrentImage)
+            },
+            {
+              type: "input_image",
+              image_url: imageBufferToDataUrl(preparedReferenceImage)
+            }
+          ]
+        }
+      ],
+      tools: [
+        {
+          type: "image_generation",
+          model: imageToolModel,
+          action: "edit",
+          size: imageToolSize,
+          quality: profile === "fast" ? "low" : "medium",
+          ...(supportsInputFidelity(imageToolModel)
+            ? {
+                input_fidelity: profile === "fast" ? "low" : "high"
+              }
+            : {})
+        }
+      ],
+      tool_choice: {
+        type: "image_generation"
+      }
+    },
+    apiKey
+  );
+
+  const imageCall = payload?.output?.find((item: any) => item.type === "image_generation_call");
+  const result = imageCall?.result;
+  if (typeof result !== "string" || !result) {
+    throw new Error("Reference restore returned no image payload.");
   }
 
   return {

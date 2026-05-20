@@ -241,10 +241,25 @@ export interface SessionDetail extends SessionSummary {
   generatedImagePlainUrl: string | null;
   generatedVideoSourceImageUrl: string | null;
   editedImageUrl?: string | null;
+  imageEditHistory?: ImageEditHistoryItem[];
   analysis: SceneAnalysis | null;
   worldJobs: WorldJob[];
   videoJobs: VideoJob[];
   websiteJobs: WebsiteJob[];
+}
+
+export interface ImageEditHistoryItem {
+  id: string;
+  revisionNumber: number;
+  createdAt: string;
+  sourceAssetKind: AssetKind;
+  transcriptText: string;
+  targetDescription: string;
+  requestedChange: string;
+  editPrompt: string;
+  annotation?: ImageEditAnnotation | null;
+  imageUrl: string;
+  annotatedImageUrl: string;
 }
 
 export interface TranscriptNormalizationResult {
@@ -365,6 +380,7 @@ export interface WebsiteEditPoint {
 
 export interface WebsiteEditStroke {
   id: string;
+  color?: string | null;
   points: WebsiteEditPoint[];
   startMs?: number | null;
   endMs?: number | null;

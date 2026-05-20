@@ -3,12 +3,24 @@ const supabasePublishableKey =
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 
+function envFlag(value: string | undefined) {
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+export function isDemoModeEnabled() {
+  return envFlag((process.env.SKRATCH_DEMO_MODE ?? process.env.NEXT_PUBLIC_SKRATCH_DEMO_MODE ?? "").toLowerCase());
+}
+
 export function hasSupabaseAuthConfig() {
   return Boolean(supabaseUrl && supabasePublishableKey);
 }
 
 export function hasSupabaseAdminConfig() {
   return hasSupabaseAuthConfig() && Boolean(supabaseServiceRoleKey);
+}
+
+export function shouldUseSupabaseSessionStore() {
+  return hasSupabaseAdminConfig() && !isDemoModeEnabled();
 }
 
 export function getSupabaseUrl() {
