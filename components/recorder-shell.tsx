@@ -1820,7 +1820,17 @@ export function RecorderShell({
                   <div className="recorder-gallery-card-thumb">
                     {item.thumbnailUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
-                      <img src={item.thumbnailUrl} alt="" className="recorder-gallery-image" />
+                      <img
+                        src={item.thumbnailUrl}
+                        alt=""
+                        className="recorder-gallery-image"
+                        onError={(event) => {
+                          event.currentTarget.hidden = true;
+                        }}
+                        onLoad={(event) => {
+                          event.currentTarget.hidden = false;
+                        }}
+                      />
                     ) : (
                       <div className="recorder-gallery-placeholder" />
                     )}

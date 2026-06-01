@@ -3247,15 +3247,17 @@ textarea {
   flex: 1;
   min-height: 0;
   display: flex;
-  align-items: stretch;
-  justify-content: stretch;
+  align-items: center;
+  justify-content: center;
 }
 
 .recorder-experience-page .recorder-board-frame {
   position: relative;
   width: 100%;
+  height: auto;
+  flex: 0 1 auto;
   max-width: none;
-  max-height: none;
+  max-height: 100%;
   aspect-ratio: 16 / 9;
   border-radius: 30px;
   box-shadow:
@@ -3263,7 +3265,17 @@ textarea {
     inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
+.recorder-experience-page .recorder-board-frame .recording-canvas {
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+
 .recorder-experience-page .recorder-bottom-controls-inline {
+  position: static;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  transform: none;
   width: 100%;
   display: flex;
   align-items: center;
@@ -3447,6 +3459,26 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  .image-experience-header {
+    flex-wrap: nowrap;
+    align-items: center;
+  }
+
+  .image-header-actions {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+  }
+
+  .image-hud-button {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 10px 14px;
+  }
+
+  .image-experience-header > .image-hud-button {
+    max-width: calc(100% - 82px);
+  }
+
   .recorder-experience-page .recorder-experience-header {
     grid-template-columns: 1fr auto;
     align-items: center;
@@ -3459,7 +3491,7 @@ textarea {
   }
 
   .recorder-experience-page .recorder-workspace {
-    top: calc(max(12px, env(safe-area-inset-top)) + 52px);
+    top: calc(max(12px, env(safe-area-inset-top)) + 58px);
     right: 12px;
     bottom: 12px;
     left: 12px;
@@ -3467,35 +3499,77 @@ textarea {
     gap: 10px;
   }
 
+  .recorder-experience-page .recorder-floating-alert {
+    top: calc(max(12px, env(safe-area-inset-top)) + 56px);
+    bottom: auto;
+    left: 16px;
+    right: 16px;
+    transform: none;
+    max-width: none;
+    padding: 12px;
+  }
+
+  .recorder-experience-page .recorder-canvas-pane {
+    justify-content: center;
+    gap: 10px;
+  }
+
+  .recorder-experience-page .recorder-board-stage {
+    flex: 0 0 auto;
+  }
+
+  .recorder-experience-page .recorder-board-frame {
+    width: 100%;
+  }
+
+  .recorder-experience-page .recorder-bottom-controls-inline {
+    min-height: 58px;
+  }
+
   .recorder-experience-page .recorder-bottom-dock {
     width: 100%;
     display: grid;
     grid-template-columns: 1fr;
+    gap: 0;
   }
 
   .recorder-experience-page .recorder-brand-copy-inline {
-    white-space: normal;
+    display: none;
   }
 
   .recorder-experience-page .recorder-target-cluster {
     width: 100%;
     min-width: 0;
+    padding: 6px;
   }
 
   .recorder-experience-page .recorder-primary-button {
     min-width: 0;
   }
 
+  .recorder-experience-page .recorder-gallery-panel {
+    overflow: hidden;
+  }
+
   .recorder-experience-page .recorder-gallery-body {
-    grid-auto-columns: 102px;
+    grid-auto-columns: 96px;
+    scrollbar-width: none;
+  }
+
+  .recorder-experience-page .recorder-gallery-body::-webkit-scrollbar {
+    display: none;
   }
 
   .recorder-experience-page .recorder-destination-control {
     width: 100%;
+    gap: 6px;
   }
 
   .recorder-experience-page .recorder-destination-control button {
     flex: 1;
+    min-height: 46px;
+    padding: 0 8px;
+    font-size: 0.82rem;
   }
 
   .recorder-experience-page .recorder-go-button {
@@ -3504,5 +3578,56 @@ textarea {
     min-width: 68px;
     height: 68px;
     min-height: 68px;
+  }
+
+  .recorder-experience-page .recorder-drawer .segmented-control {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .recorder-experience-page .recorder-drawer .segmented-control button {
+    flex: 1 1 calc(50% - 4px);
+    min-width: 0;
+  }
+}
+
+@media (max-width: 390px), (max-height: 720px) {
+  .recorder-experience-page .recorder-header-actions {
+    gap: 6px;
+  }
+
+  .recorder-experience-page .recorder-hud-button {
+    padding: 9px 14px;
+  }
+
+  .recorder-experience-page .recorder-workspace {
+    top: calc(max(10px, env(safe-area-inset-top)) + 56px);
+    gap: 8px;
+  }
+
+  .recorder-experience-page .recorder-canvas-pane {
+    gap: 8px;
+  }
+
+  .recorder-experience-page .recorder-target-cluster {
+    padding: 5px;
+  }
+
+  .recorder-experience-page .recorder-destination-control {
+    gap: 5px;
+  }
+
+  .recorder-experience-page .recorder-destination-control button {
+    min-height: 44px;
+    padding: 0 6px;
+    font-size: 0.78rem;
+  }
+
+  .recorder-experience-page .recorder-gallery-body {
+    grid-auto-columns: 88px;
+  }
+
+  .recorder-experience-page .recorder-gallery-card-thumb {
+    border-radius: 18px;
   }
 }
